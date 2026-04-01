@@ -17,6 +17,7 @@ export declare class SessionManager implements ISessionManager {
     destroyAll(): Promise<void>;
     listSessions(): SessionInfo[];
     getStats(): PoolStats;
+    getSessions(): Map<string, Session>;
     getResourceUsage(): {
         heapUsedMB: number;
         rssMB: number;

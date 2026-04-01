@@ -7,6 +7,9 @@ import * as path from "path";
 import * as os from "os";
 import { SessionManager } from "./session-manager.js";
 import { SnapshotEngine } from "./snapshot-engine.js";
+import { networkIntelligence } from "./network-intelligence.js";
+import { tabManager } from "./tab-manager.js";
+import { crashRecovery } from "./crash-recovery.js";
 // ─── Config ─────────────────────────────────────────────────────────────────
 const MAX_SESSIONS = Number(process.env.HYDRA_MAX_SESSIONS ?? 15);
 const IDLE_TIMEOUT_MS = Number(process.env.HYDRA_IDLE_TIMEOUT ?? 5 * 60 * 1000);
@@ -38,16 +41,20 @@ function requireSession(sessionId) {
     sessions.touchSession(sessionId);
     return s;
 }
+function getPage(session) {
+    return tabManager.getActivePage(session);
+}
 async function snapAndFormat(session, opts) {
-    const result = await snapEngine.snapshot(session.page, session, {
+    const page = getPage(session);
+    const result = await snapEngine.snapshot(page, session, {
         interactiveOnly: true,
         maxChars: opts?.maxChars ?? MAX_SNAPSHOT_CHARS,
         selector: opts?.selector,
     });
-    const url = session.page.url();
+    const url = page.url();
     let title = "";
     try {
-        title = await session.page.title();
+        title = await page.title();
     }
     catch { /* */ }
     return `[${session.id}] ${title}\n${url}\n${result.nodeCount} elements\n\n${result.text}`;
@@ -208,7 +215,7 @@ server.registerTool("navigate", {
             return err(`Blocked URL scheme: ${parsed.protocol} — only http/https allowed.`);
         }
         const session = requireSession(sessionId);
-        await session.page.goto(url, { waitUntil });
+        await getPage(session).goto(url, { waitUntil });
         const text = await snapAndFormat(session);
         return ok(text);
     }
@@ -266,7 +273,7 @@ server.registerTool("act", {
 }, async ({ sessionId, action, target, value, key, scrollDirection, scrollAmount }) => {
     try {
         const session = requireSession(sessionId);
-        const page = session.page;
+        const page = getPage(session);
         const urlBefore = page.url();
         // Resolve target to a Playwright locator
         const resolve = (ref) => {
@@ -376,13 +383,14 @@ server.registerTool("screenshot", {
 }, async ({ sessionId, fullPage, selector }) => {
     try {
         const session = requireSession(sessionId);
+        const page = getPage(session);
         await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
         const filepath = path.join(SCREENSHOT_DIR, `${sessionId}_${Date.now()}.png`);
         if (selector) {
-            await session.page.locator(selector).screenshot({ path: filepath });
+            await page.locator(selector).screenshot({ path: filepath });
         }
         else {
-            await session.page.screenshot({ path: filepath, fullPage });
+            await page.screenshot({ path: filepath, fullPage });
         }
         const imageBuffer = await fs.readFile(filepath);
         return {
@@ -415,7 +423,7 @@ server.registerTool("extract", {
 }, async ({ sessionId, type, target, js, maxChars }) => {
     try {
         const session = requireSession(sessionId);
-        const page = session.page;
+        const page = getPage(session);
         let result;
         const resolve = (ref) => {
             if (ref.startsWith("@e")) {
@@ -507,6 +515,217 @@ server.registerTool("pool_status", {
         }
     }
     return ok(lines.join("\n"));
+});
+// ─── network_log ───────────────────────────────────────────────────────────
+server.registerTool("network_log", {
+    title: "Network Log",
+    description: "View captured HTTP requests/responses for a session. " +
+        "Shows method, status, URL, size, and timing. " +
+        "Filter by URL pattern, method, status range, or content-type. " +
+        "Network capture starts automatically when a session is created.",
+    inputSchema: z.object({
+        sessionId: z.string().describe("Session ID."),
+        urlPattern: z.string().optional().describe("Regex or substring to filter URLs."),
+        method: z.string().optional().describe("HTTP method filter (GET, POST, etc)."),
+        statusMin: z.number().int().optional().describe("Minimum status code (e.g. 400 for errors)."),
+        statusMax: z.number().int().optional().describe("Maximum status code."),
+        contentType: z.string().optional().describe("Content-type filter (e.g. 'json')."),
+    }),
+}, async ({ sessionId, urlPattern, method, statusMin, statusMax, contentType }) => {
+    try {
+        const session = requireSession(sessionId);
+        const text = networkIntelligence.getNetworkLog(session, {
+            urlPattern, method, statusMin, statusMax, contentType,
+        });
+        return ok(text);
+    }
+    catch (e) {
+        return err(e.message);
+    }
+});
+// ─── console_log ──────────────────────────────────────────────────────────
+server.registerTool("console_log", {
+    title: "Console Log",
+    description: "View captured browser console messages (log, warn, error, info, debug). " +
+        "Console capture starts automatically when a session is created. " +
+        "Use level filter to focus on errors or warnings.",
+    inputSchema: z.object({
+        sessionId: z.string().describe("Session ID."),
+        level: z.string().optional().describe("Filter by level: error, warn, log, info, debug."),
+    }),
+}, async ({ sessionId, level }) => {
+    try {
+        const session = requireSession(sessionId);
+        const text = networkIntelligence.getConsoleLog(session, { level });
+        return ok(text);
+    }
+    catch (e) {
+        return err(e.message);
+    }
+});
+// ─── network_intercept ────────────────────────────────────────────────────
+server.registerTool("network_intercept", {
+    title: "Network Intercept",
+    description: "Add or remove network intercept rules. " +
+        "Block requests (ads, trackers), mock API responses, or log specific traffic. " +
+        "Use action='remove' with ruleId to remove an existing rule.",
+    inputSchema: z.object({
+        sessionId: z.string().describe("Session ID."),
+        action: z.enum(["block", "log", "mock", "remove"]).describe("Intercept action."),
+        ruleId: z.string().describe("Unique rule ID. Use for adding and removing rules."),
+        urlPattern: z.string().optional().describe("URL glob pattern to match (e.g. '**/analytics/**'). Required for block/log/mock."),
+        mockStatus: z.number().int().optional().describe("HTTP status for mock responses."),
+        mockBody: z.string().optional().describe("Response body for mock responses."),
+        mockContentType: z.string().optional().describe("Content-type for mock responses. Default: application/json."),
+    }),
+}, async ({ sessionId, action, ruleId, urlPattern, mockStatus, mockBody, mockContentType }) => {
+    try {
+        const session = requireSession(sessionId);
+        const page = getPage(session);
+        if (action === "remove") {
+            await networkIntelligence.removeIntercept(page, session, ruleId);
+            return ok(`Removed intercept rule: ${ruleId}`);
+        }
+        if (!urlPattern)
+            return err("urlPattern is required for block/log/mock actions.");
+        const rule = {
+            id: ruleId,
+            urlPattern,
+            action: action,
+            ...(action === "mock" ? {
+                mockResponse: {
+                    status: mockStatus ?? 200,
+                    body: mockBody ?? "{}",
+                    contentType: mockContentType ?? "application/json",
+                },
+            } : {}),
+        };
+        await networkIntelligence.addIntercept(page, session, rule);
+        return ok(`Intercept rule added: ${ruleId} → ${action} ${urlPattern}`);
+    }
+    catch (e) {
+        return err(e.message);
+    }
+});
+// ─── wait_for ─────────────────────────────────────────────────────────────
+server.registerTool("wait_for", {
+    title: "Smart Wait",
+    description: "Wait for a condition before proceeding. " +
+        "Supports: element visible, text appears, network idle, URL navigation, JS expression truthy. " +
+        "Returns a fresh snapshot after the wait completes.",
+    inputSchema: z.object({
+        sessionId: z.string().describe("Session ID."),
+        condition: z.enum(["element", "text", "network_idle", "navigation", "js"]).describe("What to wait for."),
+        target: z.string().optional().describe("@eN ref or CSS selector (for element/text conditions)."),
+        text: z.string().optional().describe("Text to find (for text condition) or URL pattern (for navigation)."),
+        js: z.string().optional().describe("JS expression that should return truthy (for js condition)."),
+        timeout: z.number().int().default(10000).describe("Max wait time in ms. Default 10000, max 30000."),
+    }),
+}, async ({ sessionId, condition, target, text, js, timeout }) => {
+    try {
+        const session = requireSession(sessionId);
+        const page = getPage(session);
+        await tabManager.waitFor(page, session, { type: condition, target, text, js, timeout });
+        const snap = await snapAndFormat(session);
+        return ok(`Wait complete: ${condition}\n\n${snap}`);
+    }
+    catch (e) {
+        return err(`Wait failed: ${e.message}`);
+    }
+});
+// ─── tabs_list ────────────────────────────────────────────────────────────
+server.registerTool("tabs_list", {
+    title: "List Tabs",
+    description: "List all open tabs in a session. Shows index, URL, title, and which tab is active. " +
+        "New tabs (popups, OAuth windows) are automatically tracked.",
+    inputSchema: z.object({
+        sessionId: z.string().describe("Session ID."),
+    }),
+}, async ({ sessionId }) => {
+    try {
+        const session = requireSession(sessionId);
+        const tabs = await tabManager.listTabs(session);
+        if (tabs.length === 0)
+            return ok("No open tabs.");
+        const lines = tabs.map((t) => {
+            const active = t.isActive ? " *active*" : "";
+            return `[${t.index}]${active} ${t.url} "${t.title}"`;
+        });
+        return ok(lines.join("\n"));
+    }
+    catch (e) {
+        return err(e.message);
+    }
+});
+// ─── tab_switch ───────────────────────────────────────────────────────────
+server.registerTool("tab_switch", {
+    title: "Switch Tab",
+    description: "Switch to a different tab by index. Use -1 to switch to the most recently opened tab (useful for popups). " +
+        "Returns a snapshot of the newly active tab.",
+    inputSchema: z.object({
+        sessionId: z.string().describe("Session ID."),
+        tabIndex: z.number().int().describe("Tab index to switch to. -1 for last (most recent) tab."),
+    }),
+}, async ({ sessionId, tabIndex }) => {
+    try {
+        const session = requireSession(sessionId);
+        tabManager.switchTab(session, tabIndex);
+        const snap = await snapAndFormat(session);
+        return ok(`Switched to tab ${tabIndex}\n\n${snap}`);
+    }
+    catch (e) {
+        return err(e.message);
+    }
+});
+// ─── tab_close ────────────────────────────────────────────────────────────
+server.registerTool("tab_close", {
+    title: "Close Tab",
+    description: "Close a tab by index. Defaults to the active tab. Cannot close the last remaining tab. " +
+        "Returns a snapshot of the new active tab.",
+    inputSchema: z.object({
+        sessionId: z.string().describe("Session ID."),
+        tabIndex: z.number().int().optional().describe("Tab index to close. Omit to close the active tab."),
+    }),
+}, async ({ sessionId, tabIndex }) => {
+    try {
+        const session = requireSession(sessionId);
+        await tabManager.closeTab(session, tabIndex);
+        const snap = await snapAndFormat(session);
+        return ok(`Tab closed.\n\n${snap}`);
+    }
+    catch (e) {
+        return err(e.message);
+    }
+});
+// ─── session_health ───────────────────────────────────────────────────────
+server.registerTool("session_health", {
+    title: "Session Health Check",
+    description: "Check if a session is healthy (browser connected, page responsive). " +
+        "Omit sessionId to check all sessions. Quick diagnostic for debugging.",
+    inputSchema: z.object({
+        sessionId: z.string().optional().describe("Session ID. Omit to check all."),
+    }),
+}, async ({ sessionId }) => {
+    try {
+        if (sessionId) {
+            const session = requireSession(sessionId);
+            const result = await crashRecovery.healthCheck(session);
+            return ok(`${sessionId}: ${result.healthy ? "healthy" : `unhealthy — ${result.reason}`}`);
+        }
+        // Check all sessions
+        const allSessions = sessions.getSessions();
+        if (allSessions.size === 0)
+            return ok("No active sessions.");
+        const results = await crashRecovery.healthCheckAll(allSessions);
+        const lines = [];
+        for (const [id, result] of results) {
+            lines.push(`${id}: ${result.healthy ? "healthy" : `unhealthy — ${result.reason}`}`);
+        }
+        return ok(lines.join("\n"));
+    }
+    catch (e) {
+        return err(e.message);
+    }
 });
 // ─── Startup ────────────────────────────────────────────────────────────────
 async function main() {

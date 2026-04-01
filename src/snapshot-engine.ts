@@ -275,13 +275,14 @@ export class SnapshotEngine implements ISnapshotEngine {
     try {
       if (opts?.selector) {
         // Scoped snapshot via locator
-        yaml = await page
+        // ariaSnapshot exists at runtime but not in ~1.48.0 type defs
+        yaml = await (page
           .locator(opts.selector)
-          .first()
+          .first() as any)
           .ariaSnapshot({ mode: "ai" });
       } else {
         // Full page snapshot
-        yaml = await page.ariaSnapshot({ mode: "ai" });
+        yaml = await (page as any).ariaSnapshot({ mode: "ai" });
       }
     } catch {
       return {

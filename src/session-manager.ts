@@ -8,6 +8,11 @@ import type {
   ISessionManager,
   PoolStats,
 } from "./types.js";
+import { stealth } from "./stealth.js";
+import { crashRecovery } from "./crash-recovery.js";
+import { networkIntelligence } from "./network-intelligence.js";
+import { tabManager } from "./tab-manager.js";
+import { logger } from "./logger.js";
 
 const DEFAULT_CONFIG: SessionManagerConfig = {
   maxSessions: 10,
@@ -50,7 +55,20 @@ export class SessionManager implements ISessionManager {
       this.browser = null;
     }
 
-    this.browser = await chromium.launch({ headless: this.config.headless });
+    const launchOpts: Record<string, unknown> = { headless: this.config.headless };
+    if (stealth.isEnabled()) {
+      launchOpts.args = stealth.getLaunchArgs();
+    }
+    this.browser = await chromium.launch(launchOpts);
+    logger.info("browser.launched", { headless: this.config.headless, stealth: stealth.isEnabled() });
+
+    // Attach crash recovery — auto-clears sessions on unexpected disconnect
+    crashRecovery.attachToBrowser(this.browser, () => {
+      logger.error("browser.crash_recovery", { sessionsLost: this.sessions.size });
+      this.sessions.clear();
+      this.browser = null;
+    });
+
     this.startCleanupTimer();
     return this.browser;
   }
@@ -106,8 +124,9 @@ export class SessionManager implements ISessionManager {
 
     const viewport = opts?.viewport ?? this.config.defaultViewport;
 
-    // Build context options
-    const contextOpts: Record<string, unknown> = { viewport };
+    // Build context options — merge stealth defaults
+    const stealthOpts = stealth.isEnabled() ? stealth.getContextOptions(opts?.userAgent) : {};
+    const contextOpts: Record<string, unknown> = { viewport, ...stealthOpts };
 
     if (opts?.userAgent) {
       contextOpts.userAgent = opts.userAgent;
@@ -125,6 +144,11 @@ export class SessionManager implements ISessionManager {
 
     const context = await browser.newContext(contextOpts);
     const page = await context.newPage();
+
+    // Apply stealth init scripts to evade bot detection
+    if (stealth.isEnabled()) {
+      await stealth.applyToPage(page);
+    }
 
     // Auto-dismiss browser dialogs (alert, confirm, prompt) to prevent session hangs
     page.on("dialog", (dialog) => dialog.dismiss().catch(() => {}));
@@ -150,6 +174,14 @@ export class SessionManager implements ISessionManager {
     this.sessions.set(id, session);
     this.totalCreated++;
 
+    // Wire up network intelligence (auto-capture requests + console)
+    networkIntelligence.attachToPage(page, session);
+
+    // Wire up tab manager (auto-track new tabs/popups)
+    tabManager.attachToContext(context, session);
+
+    logger.info("session.created", { id, profilePath: opts?.profilePath });
+
     return session;
   }
 
@@ -169,12 +201,15 @@ export class SessionManager implements ISessionManager {
     if (!session) return;
 
     this.sessions.delete(id);
+    networkIntelligence.cleanupSession(id);
 
     try {
       await session.context.close();
     } catch {
       // Context may already be closed (browser crash, manual close) — safe to ignore
     }
+
+    logger.info("session.destroyed", { id });
   }
 
   async destroyAll(): Promise<void> {
@@ -227,6 +262,10 @@ export class SessionManager implements ISessionManager {
       maxSessions: this.config.maxSessions,
       totalCreated: this.totalCreated,
     };
+  }
+
+  getSessions(): Map<string, Session> {
+    return this.sessions;
   }
 
   getResourceUsage(): { heapUsedMB: number; rssMB: number; sessionsActive: number; uptimeSeconds: number } {

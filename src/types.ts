@@ -1,11 +1,42 @@
 import type { Browser, BrowserContext, Page } from "playwright";
 
+// ─── Network Intelligence ─────────────────────────────────────────────────
+
+export interface NetworkEntry {
+  timestamp: number;
+  method: string;
+  url: string;
+  status: number;
+  contentType: string;
+  responseSize: number;
+  duration: number;
+  responseBody?: string; // Only for JSON/text responses under 10KB
+}
+
+export interface ConsoleEntry {
+  timestamp: number;
+  level: "log" | "warn" | "error" | "info" | "debug";
+  text: string;
+}
+
+export interface NetworkInterceptRule {
+  id: string;
+  urlPattern: string;
+  action: "block" | "log" | "mock";
+  mockResponse?: { status: number; body: string; contentType: string };
+}
+
 // ─── Session ────────────────────────────────────────────────────────────────
 
 export interface Session {
   id: string;
   context: BrowserContext;
+  /** @deprecated Use TabManager.getActivePage() instead. Kept for backward compatibility. */
   page: Page;
+  /** All open pages (tabs) in this session, managed by TabManager */
+  pages?: Page[];
+  /** Index of the currently active page in the pages array */
+  activePageIndex?: number;
   createdAt: number;
   lastUsedAt: number;
   /** Ref counter for compact snapshot elements — increments across snapshots */
@@ -13,6 +44,12 @@ export interface Session {
   /** Map from @eN ref string to Playwright locator selector */
   refMap: Map<string, string>;
   profilePath?: string;
+  /** Ring buffer of captured network responses (max 200). Initialized by NetworkIntelligence.attachToPage(). */
+  networkLog?: NetworkEntry[];
+  /** Ring buffer of captured console messages (max 100). Initialized by NetworkIntelligence.attachToPage(). */
+  consoleLog?: ConsoleEntry[];
+  /** Active intercept rules for this session. Initialized by NetworkIntelligence.attachToPage(). */
+  interceptRules?: NetworkInterceptRule[];
 }
 
 export interface SessionCreateOptions {
@@ -94,6 +131,27 @@ export interface SnapshotResult {
 
 export interface ISnapshotEngine {
   snapshot(page: Page, session: Session, opts?: SnapshotOptions): Promise<SnapshotResult>;
+}
+
+// ─── Tab Manager ──────────────────────────────────────────────────────────
+
+export interface TabInfo {
+  index: number;
+  url: string;
+  title: string;
+  isActive: boolean;
+}
+
+export interface WaitCondition {
+  type: "element" | "text" | "network_idle" | "navigation" | "js";
+  /** CSS selector or @eN ref */
+  target?: string;
+  /** Text to wait for or URL pattern */
+  text?: string;
+  /** JavaScript expression to evaluate */
+  js?: string;
+  /** Timeout in ms. Default: 10000, max: 30000 */
+  timeout?: number;
 }
 
 // ─── MCP Tool Helpers ───────────────────────────────────────────────────────

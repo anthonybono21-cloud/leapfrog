@@ -1,4 +1,9 @@
 import { chromium } from "playwright";
+import { stealth } from "./stealth.js";
+import { crashRecovery } from "./crash-recovery.js";
+import { networkIntelligence } from "./network-intelligence.js";
+import { tabManager } from "./tab-manager.js";
+import { logger } from "./logger.js";
 const DEFAULT_CONFIG = {
     maxSessions: 10,
     idleTimeoutMs: 5 * 60 * 1000,
@@ -33,7 +38,18 @@ export class SessionManager {
             this.sessions.clear();
             this.browser = null;
         }
-        this.browser = await chromium.launch({ headless: this.config.headless });
+        const launchOpts = { headless: this.config.headless };
+        if (stealth.isEnabled()) {
+            launchOpts.args = stealth.getLaunchArgs();
+        }
+        this.browser = await chromium.launch(launchOpts);
+        logger.info("browser.launched", { headless: this.config.headless, stealth: stealth.isEnabled() });
+        // Attach crash recovery — auto-clears sessions on unexpected disconnect
+        crashRecovery.attachToBrowser(this.browser, () => {
+            logger.error("browser.crash_recovery", { sessionsLost: this.sessions.size });
+            this.sessions.clear();
+            this.browser = null;
+        });
         this.startCleanupTimer();
         return this.browser;
     }
@@ -75,8 +91,9 @@ export class SessionManager {
         }
         const browser = await this.ensureBrowser();
         const viewport = opts?.viewport ?? this.config.defaultViewport;
-        // Build context options
-        const contextOpts = { viewport };
+        // Build context options — merge stealth defaults
+        const stealthOpts = stealth.isEnabled() ? stealth.getContextOptions(opts?.userAgent) : {};
+        const contextOpts = { viewport, ...stealthOpts };
         if (opts?.userAgent) {
             contextOpts.userAgent = opts.userAgent;
         }
@@ -93,6 +110,10 @@ export class SessionManager {
         }
         const context = await browser.newContext(contextOpts);
         const page = await context.newPage();
+        // Apply stealth init scripts to evade bot detection
+        if (stealth.isEnabled()) {
+            await stealth.applyToPage(page);
+        }
         // Auto-dismiss browser dialogs (alert, confirm, prompt) to prevent session hangs
         page.on("dialog", (dialog) => dialog.dismiss().catch(() => { }));
         // Generate a unique short ID
@@ -113,6 +134,11 @@ export class SessionManager {
         };
         this.sessions.set(id, session);
         this.totalCreated++;
+        // Wire up network intelligence (auto-capture requests + console)
+        networkIntelligence.attachToPage(page, session);
+        // Wire up tab manager (auto-track new tabs/popups)
+        tabManager.attachToContext(context, session);
+        logger.info("session.created", { id, profilePath: opts?.profilePath });
         return session;
     }
     getSession(id) {
@@ -129,12 +155,14 @@ export class SessionManager {
         if (!session)
             return;
         this.sessions.delete(id);
+        networkIntelligence.cleanupSession(id);
         try {
             await session.context.close();
         }
         catch {
             // Context may already be closed (browser crash, manual close) — safe to ignore
         }
+        logger.info("session.destroyed", { id });
     }
     async destroyAll() {
         // Destroy all sessions first (closes contexts)
@@ -179,6 +207,9 @@ export class SessionManager {
             maxSessions: this.config.maxSessions,
             totalCreated: this.totalCreated,
         };
+    }
+    getSessions() {
+        return this.sessions;
     }
     getResourceUsage() {
         const mem = process.memoryUsage();
