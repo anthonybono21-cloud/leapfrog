@@ -895,9 +895,132 @@ server.registerTool(
   },
 );
 
+// ─── CLI Flags ─────────────────────────────────────────────────────────────
+
+async function runDoctor(): Promise<void> {
+  const checks: Array<{ label: string; status: "pass" | "fail" | "warn"; detail?: string }> = [];
+
+  // Node version
+  const nodeVersion = process.versions.node;
+  const major = parseInt(nodeVersion.split(".")[0], 10);
+  checks.push({
+    label: "Node.js >= 18",
+    status: major >= 18 ? "pass" : "fail",
+    detail: `v${nodeVersion}`,
+  });
+
+  // Playwright chromium binary
+  let chromiumPath = "";
+  try {
+    const { chromium } = await import("playwright");
+    chromiumPath = chromium.executablePath();
+    await fs.access(chromiumPath);
+    checks.push({ label: "Chromium binary", status: "pass", detail: chromiumPath });
+  } catch {
+    checks.push({
+      label: "Chromium binary",
+      status: "fail",
+      detail: "Not found. Run: npx playwright install chromium",
+    });
+  }
+
+  // Can launch browser
+  if (chromiumPath) {
+    try {
+      const { chromium } = await import("playwright");
+      const browser = await chromium.launch({ headless: true });
+      const page = await browser.newPage();
+      await page.goto("about:blank");
+      await browser.close();
+      checks.push({ label: "Browser launch", status: "pass" });
+    } catch (e: any) {
+      checks.push({ label: "Browser launch", status: "fail", detail: e.message });
+    }
+  } else {
+    checks.push({ label: "Browser launch", status: "fail", detail: "Skipped (no binary)" });
+  }
+
+  // Profiles directory
+  try {
+    await fs.mkdir(PROFILE_DIR, { recursive: true });
+    await fs.access(PROFILE_DIR, (await import("fs")).constants.W_OK);
+    checks.push({ label: "Profiles directory", status: "pass", detail: PROFILE_DIR });
+  } catch {
+    checks.push({ label: "Profiles directory", status: "warn", detail: `Not writable: ${PROFILE_DIR}` });
+  }
+
+  // Screenshots directory
+  try {
+    await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
+    await fs.access(SCREENSHOT_DIR, (await import("fs")).constants.W_OK);
+    checks.push({ label: "Screenshots directory", status: "pass", detail: SCREENSHOT_DIR });
+  } catch {
+    checks.push({ label: "Screenshots directory", status: "warn", detail: `Not writable: ${SCREENSHOT_DIR}` });
+  }
+
+  // Print results
+  console.log("\nHydraChrome Doctor\n");
+  for (const c of checks) {
+    const tag = c.status === "pass" ? "[pass]" : c.status === "fail" ? "[fail]" : "[warn]";
+    const detail = c.detail ? `  ${c.detail}` : "";
+    console.log(`  ${tag}  ${c.label}${detail}`);
+  }
+
+  // Env var summary
+  console.log("\nEnvironment:\n");
+  console.log(`  HYDRA_MAX_SESSIONS   = ${process.env.HYDRA_MAX_SESSIONS ?? "(default: 15)"}`);
+  console.log(`  HYDRA_IDLE_TIMEOUT   = ${process.env.HYDRA_IDLE_TIMEOUT ?? "(default: 300000)"}`);
+  console.log(`  HYDRA_HEADLESS       = ${process.env.HYDRA_HEADLESS ?? "(default: true)"}`);
+  console.log(`  HYDRA_ALLOW_JS       = ${process.env.HYDRA_ALLOW_JS ?? "(default: true)"}`);
+  console.log(`  HYDRA_STEALTH        = ${process.env.HYDRA_STEALTH ?? "(default: true)"}`);
+  console.log(`  HYDRA_LOG_LEVEL      = ${process.env.HYDRA_LOG_LEVEL ?? "(default: info)"}`);
+  console.log();
+
+  const failed = checks.some((c) => c.status === "fail");
+  process.exit(failed ? 1 : 0);
+}
+
+function printConfig(): void {
+  const config = {
+    hydrachrome: {
+      command: "npx",
+      args: ["-y", "hydrachrome"],
+      env: {
+        HYDRA_MAX_SESSIONS: "15",
+      },
+    },
+  };
+  console.log("\nPaste this into your ~/.mcp.json:\n");
+  console.log(JSON.stringify(config, null, 2));
+  console.log();
+  process.exit(0);
+}
+
+function printVersion(): void {
+  console.log("0.1.0");
+  process.exit(0);
+}
+
 // ─── Startup ────────────────────────────────────────────────────────────────
 
 async function main() {
+  const args = process.argv.slice(2);
+
+  if (args.includes("--version") || args.includes("-v")) {
+    printVersion();
+    return;
+  }
+
+  if (args.includes("--config")) {
+    printConfig();
+    return;
+  }
+
+  if (args.includes("--doctor")) {
+    await runDoctor();
+    return;
+  }
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`HydraChrome MCP server running (max ${MAX_SESSIONS} sessions, headless=${HEADLESS})`);
