@@ -209,7 +209,6 @@ export class SnapshotEngine {
         try {
             if (opts?.selector) {
                 // Scoped snapshot via locator
-                // ariaSnapshot exists at runtime but not in ~1.48.0 type defs
                 yaml = await page
                     .locator(opts.selector)
                     .first()

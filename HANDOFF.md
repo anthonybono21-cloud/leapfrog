@@ -1,13 +1,13 @@
-# HydraChrome — Session Handoff
+# Leapfrog — Session Handoff
 
 **Date:** April 1, 2026
-**Last session:** HydraBrowser Build (5-agent audit + Sprint 1 fixes)
+**Last session:** Leapfrog Build (5-agent audit + Sprint 1 fixes)
 
 ---
 
 ## What Just Happened
 
-1. Ran 5 parallel sub-agents to audit every aspect of HydraChrome
+1. Ran 5 parallel sub-agents to audit every aspect of Leapfrog
 2. Found 3 critical, 7 high, 7 medium severity issues
 3. Completed Sprint 1 — all critical security fixes shipped and committed
 
@@ -30,10 +30,10 @@
 
 1. `navigate` to `file:///etc/hosts` → should get "Blocked URL scheme: file:"
 2. `session_save_profile` with name `../../evil` → should sanitize to empty string → error
-3. `session_create` with profilePath `/etc/passwd` → should get "profilePath must be within ~/.hydrachrome/profiles/"
+3. `session_create` with profilePath `/etc/passwd` → should get "profilePath must be within ~/.leapfrog/profiles/"
 4. `extract` type="js" with js="undefined" → should return "undefined" (not crash)
 5. `extract` type="js" with js="while(true){}" → should timeout after 10s
-6. Set `HYDRA_ALLOW_JS=false` env, verify JS eval is blocked
+6. Set `LEAP_ALLOW_JS=false` env, verify JS eval is blocked
 
 ## Sprint 2 Backlog (Ship With Confidence)
 
@@ -56,11 +56,11 @@
 
 | What | Where |
 |------|-------|
-| Source | `~/Projects/hydrachrome/src/` (4 files) |
-| Audit checkpoint | `~/Projects/hydrachrome/AUDIT-CHECKPOINT.md` |
+| Source | `~/Projects/leapfrog/src/` (4 files) |
+| Audit checkpoint | `~/Projects/leapfrog/AUDIT-CHECKPOINT.md` |
 | Build handoff (original) | `~/whats-next.md` |
-| Memory | `~/.claude/projects/-Users-ted/memory/project_hydrachrome.md` |
-| MCP config | `~/.mcp.json` → `"hydrachrome"` |
+| Memory | `~/.claude/projects/-Users-ted/memory/project_leapfrog.md` |
+| MCP config | `~/.mcp.json` → `"leapfrog"` |
 
 ## Git Log
 
@@ -74,4 +74,4 @@ eaebaf4 Phase 1+2: Session pool + compact snapshot engine + MCP tools
 
 ## Codename Note
 
-Ted's not sold on "HydraBrowser" — name TBD. Code/repo is still `hydrachrome` everywhere.
+Renamed to "Leapfrog" — code/repo updated from `hydrachrome` to `leapfrog`.

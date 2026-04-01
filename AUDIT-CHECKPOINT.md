@@ -1,7 +1,7 @@
-# HydraChrome 5-Agent Audit — Checkpoint
+# Leapfrog 5-Agent Audit — Checkpoint
 
 **Date:** April 1, 2026
-**Session:** HydraBrowser Build
+**Session:** Leapfrog Build
 **Context:** Full audit complete, fixes not yet started
 
 ---
@@ -79,7 +79,7 @@
 | 4 | Fix JS `undefined` crash (null-check) | 5 min |
 | 5 | Add JS eval timeout (prevent infinite loops) | 30 min |
 | 6 | Enforce `maxChars` on JS results | 15 min |
-| 7 | Add `HYDRA_ALLOW_JS=false` env default | 30 min |
+| 7 | Add `LEAP_ALLOW_JS=false` env default | 30 min |
 | 8 | Dialog auto-dismiss (`page.on('dialog')`) | 15 min |
 
 ### Sprint 2: "Ship With Confidence" (~1-2 days)
@@ -136,12 +136,12 @@ Memory: ~19MB RSS per session
 
 | What | Where |
 |------|-------|
-| Source | `~/Projects/hydrachrome/src/` (4 files, ~1,250 lines) |
-| Built output | `~/Projects/hydrachrome/dist/` |
-| MCP registration | `~/.mcp.json` → `"hydrachrome"` |
-| Profiles | `~/.hydrachrome/profiles/` |
-| Screenshots | `~/Documents/hydrachrome-screenshots/` |
+| Source | `~/Projects/leapfrog/src/` (4 files, ~1,250 lines) |
+| Built output | `~/Projects/leapfrog/dist/` |
+| MCP registration | `~/.mcp.json` → `"leapfrog"` |
+| Profiles | `~/.leapfrog/profiles/` |
+| Screenshots | `~/Documents/leapfrog-screenshots/` |
 | Research | `~/Documents/AI-BROWSER-LANDSCAPE-RESEARCH.md` |
 | Build handoff | `~/whats-next.md` |
-| This audit | `~/Projects/hydrachrome/AUDIT-CHECKPOINT.md` |
-| Memory | `~/.claude/projects/-Users-ted/memory/project_hydrachrome.md` |
+| This audit | `~/Projects/leapfrog/AUDIT-CHECKPOINT.md` |
+| Memory | `~/.claude/projects/-Users-ted/memory/project_leapfrog.md` |

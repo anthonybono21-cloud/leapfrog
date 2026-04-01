@@ -1,4 +1,4 @@
-# HydraChrome Roadmap
+# Leapfrog Roadmap
 
 **Generated:** April 1, 2026
 **Source:** 5-agent parallel brainstorm (enterprise, features, AI-native, security, DX)
@@ -19,7 +19,7 @@
 
 ### P1 — Production Ready
 - [ ] Session state serialization (survive restarts via `context.storageState()` + URL to disk)
-- [ ] YAML config file (`~/.hydrachrome/config.yaml` with Zod validation)
+- [ ] YAML config file (`~/.leapfrog/config.yaml` with Zod validation)
 - [ ] HTTP health endpoint (`/_health` on configurable port)
 - [ ] Graceful drain mode (SIGTERM → stop accepting new sessions, wait for idle)
 - [ ] Screenshot directory garbage collection (24h TTL, 500MB cap)
@@ -32,7 +32,7 @@
 
 ### High Impact
 - [ ] **Cookie import from real Chrome** — decrypt Chrome SQLite cookies, inject into session. `better-sqlite3` + `crypto` for AES-128-CBC decryption with Keychain key. THE biggest capability unlock.
-- [ ] **File download interception** — `page.on('download')`, save to `~/Documents/hydrachrome-downloads/`, `download_list` + `download_wait` tools
+- [ ] **File download interception** — `page.on('download')`, save to `~/Documents/leapfrog-downloads/`, `download_list` + `download_wait` tools
 - [ ] **PDF generation** — `page.pdf()` with format/margin/scale options, headless-only
 - [ ] **Form auto-fill** — `form_detect` (discover fields) + `form_fill` (fill by name/label, handles input types). Saves 10-50 tool calls per form.
 - [ ] **Page diff** — store previous snapshot on session, return only added/removed/changed elements
@@ -54,7 +54,7 @@
 2. **Page Classification** (250 lines) — heuristic classifiers on accessibility tree: login_form, search_results, product_listing, checkout, error_page, captcha, cookie_consent, etc.
 3. **Action Suggestions** (200 lines) — template-based suggestions per page type, with @eN refs mapped. Optional `includeIntelligence` flag on navigate/snapshot.
 4. **Smart Element Targeting** (350 lines) — natural language element finding via fuzzy match + synonym dictionary + role/name scoring. "the login button" → @e7. No LLM needed.
-5. **Structured Data Extraction** (400 lines) — agent provides JSON schema, HydraChrome populates from accessibility tree + DOM heuristics (table/list/key-value detection, type coercion)
+5. **Structured Data Extraction** (400 lines) — agent provides JSON schema, Leapfrog populates from accessibility tree + DOM heuristics (table/list/key-value detection, type coercion)
 6. **API Auto-Discovery** (300 lines) — analyze `networkLog` to find REST/GraphQL endpoints, infer schemas from captured response bodies, detect auth patterns
 7. **Composite Actions** (500 lines) — `login()`, `search()`, `paginate()`, `accept_cookies()`, `fill_form()`. Orchestrate existing tools internally.
 
@@ -67,7 +67,7 @@
 
 - [ ] Multi-process browser pool (worker_threads, N Chromium instances)
 - [ ] Remote browser backends (`playwright.connect(wsEndpoint)`)
-- [ ] OpenTelemetry tracing (optional, `HYDRA_OTEL_ENDPOINT`)
+- [ ] OpenTelemetry tracing (optional, `LEAP_OTEL_ENDPOINT`)
 - [ ] Prometheus metrics endpoint (`/metrics` on configurable port)
 - [ ] Session journal (append-only NDJSON audit trail)
 - [ ] Per-session memory limits + resource governor
@@ -132,6 +132,6 @@ Top candidates (all available on npm):
 
 ## Competitive Position
 
-> "The market is splitting into Camp A (Playwright wrappers) and Camp B (AI-native browsers). The winner will be Camp C — raw browser intelligence alongside efficient interaction primitives. HydraChrome's multi-session architecture is the right foundation."
+> "The market is splitting into Camp A (Playwright wrappers) and Camp B (AI-native browsers). The winner will be Camp C — raw browser intelligence alongside efficient interaction primitives. Leapfrog's multi-session architecture is the right foundation."
 
 No other tool combines: local-first + multi-session isolation + token efficiency + network intelligence + stealth + AI-native page understanding. That's the moat.

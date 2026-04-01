@@ -14,16 +14,16 @@ import { tabManager } from "./tab-manager.js";
 import { crashRecovery } from "./crash-recovery.js";
 import { logger } from "./logger.js";
 // ─── Config ─────────────────────────────────────────────────────────────────
-const MAX_SESSIONS = Number(process.env.HYDRA_MAX_SESSIONS ?? 15);
-const IDLE_TIMEOUT_MS = Number(process.env.HYDRA_IDLE_TIMEOUT ?? 5 * 60 * 1000);
+const MAX_SESSIONS = Number(process.env.LEAP_MAX_SESSIONS ?? 15);
+const IDLE_TIMEOUT_MS = Number(process.env.LEAP_IDLE_TIMEOUT ?? 5 * 60 * 1000);
 if (!Number.isFinite(MAX_SESSIONS) || MAX_SESSIONS < 1)
-    throw new Error("Invalid HYDRA_MAX_SESSIONS");
+    throw new Error("Invalid LEAP_MAX_SESSIONS");
 if (!Number.isFinite(IDLE_TIMEOUT_MS) || IDLE_TIMEOUT_MS < 1000)
-    throw new Error("Invalid HYDRA_IDLE_TIMEOUT");
-const HEADLESS = process.env.HYDRA_HEADLESS !== "false";
-const SCREENSHOT_DIR = path.join(os.homedir(), "Documents", "hydrachrome-screenshots");
+    throw new Error("Invalid LEAP_IDLE_TIMEOUT");
+const HEADLESS = process.env.LEAP_HEADLESS !== "false";
+const SCREENSHOT_DIR = path.join(os.homedir(), "Documents", "leapfrog-screenshots");
 const MAX_SNAPSHOT_CHARS = 10000;
-const ALLOW_JS = process.env.HYDRA_ALLOW_JS !== "false";
+const ALLOW_JS = process.env.LEAP_ALLOW_JS !== "false";
 const sessions = new SessionManager({
     maxSessions: MAX_SESSIONS,
     idleTimeoutMs: IDLE_TIMEOUT_MS,
@@ -62,7 +62,7 @@ async function snapAndFormat(session, opts) {
     catch { /* */ }
     return `[${session.id}] ${title}\n${url}\n${result.nodeCount} elements\n\n${result.text}`;
 }
-const PROFILE_DIR = path.join(os.homedir(), ".hydrachrome", "profiles");
+const PROFILE_DIR = path.join(os.homedir(), ".leapfrog", "profiles");
 // ─── SSRF Protection ───────────────────────────────────────────────────────
 const BLOCKED_IP_RANGES = [
     /^127\./, /^10\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./,
@@ -93,7 +93,7 @@ async function checkSSRF(hostname) {
     return null;
 }
 // ─── Server ─────────────────────────────────────────────────────────────────
-const server = new McpServer({ name: "hydrachrome", version: "0.1.0" }, { capabilities: { tools: {} } });
+const server = new McpServer({ name: "leapfrog", version: "0.1.0" }, { capabilities: { tools: {} } });
 // ─── session_create ─────────────────────────────────────────────────────────
 server.registerTool("session_create", {
     title: "Create Browser Session",
@@ -483,7 +483,7 @@ server.registerTool("extract", {
                 if (!js)
                     return err("type='js' requires a js expression.");
                 if (!ALLOW_JS)
-                    return err("JavaScript evaluation is disabled. Set HYDRA_ALLOW_JS=true to enable.");
+                    return err("JavaScript evaluation is disabled. Set LEAP_ALLOW_JS=true to enable.");
                 let val;
                 try {
                     val = await Promise.race([
@@ -663,7 +663,7 @@ server.registerTool("wait_for", {
     try {
         const session = requireSession(sessionId);
         if (condition === "js" && !ALLOW_JS) {
-            return err("JavaScript evaluation is disabled. Set HYDRA_ALLOW_JS=true to enable.");
+            return err("JavaScript evaluation is disabled. Set LEAP_ALLOW_JS=true to enable.");
         }
         const page = getPage(session);
         await tabManager.waitFor(page, session, { type: condition, target, text, js, timeout });
@@ -768,11 +768,123 @@ server.registerTool("session_health", {
         return err(e.message);
     }
 });
+// ─── CLI Flags ─────────────────────────────────────────────────────────────
+async function runDoctor() {
+    const checks = [];
+    // Node version
+    const nodeVersion = process.versions.node;
+    const major = parseInt(nodeVersion.split(".")[0], 10);
+    checks.push({
+        label: "Node.js >= 18",
+        status: major >= 18 ? "pass" : "fail",
+        detail: `v${nodeVersion}`,
+    });
+    // Playwright chromium binary
+    let chromiumPath = "";
+    try {
+        const { chromium } = await import("playwright");
+        chromiumPath = chromium.executablePath();
+        await fs.access(chromiumPath);
+        checks.push({ label: "Chromium binary", status: "pass", detail: chromiumPath });
+    }
+    catch {
+        checks.push({
+            label: "Chromium binary",
+            status: "fail",
+            detail: "Not found. Run: npx playwright install chromium",
+        });
+    }
+    // Can launch browser
+    if (chromiumPath) {
+        try {
+            const { chromium } = await import("playwright");
+            const browser = await chromium.launch({ headless: true });
+            const page = await browser.newPage();
+            await page.goto("about:blank");
+            await browser.close();
+            checks.push({ label: "Browser launch", status: "pass" });
+        }
+        catch (e) {
+            checks.push({ label: "Browser launch", status: "fail", detail: e.message });
+        }
+    }
+    else {
+        checks.push({ label: "Browser launch", status: "fail", detail: "Skipped (no binary)" });
+    }
+    // Profiles directory
+    try {
+        await fs.mkdir(PROFILE_DIR, { recursive: true });
+        await fs.access(PROFILE_DIR, (await import("fs")).constants.W_OK);
+        checks.push({ label: "Profiles directory", status: "pass", detail: PROFILE_DIR });
+    }
+    catch {
+        checks.push({ label: "Profiles directory", status: "warn", detail: `Not writable: ${PROFILE_DIR}` });
+    }
+    // Screenshots directory
+    try {
+        await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
+        await fs.access(SCREENSHOT_DIR, (await import("fs")).constants.W_OK);
+        checks.push({ label: "Screenshots directory", status: "pass", detail: SCREENSHOT_DIR });
+    }
+    catch {
+        checks.push({ label: "Screenshots directory", status: "warn", detail: `Not writable: ${SCREENSHOT_DIR}` });
+    }
+    // Print results
+    console.log("\nLeapfrog Doctor\n");
+    for (const c of checks) {
+        const tag = c.status === "pass" ? "[pass]" : c.status === "fail" ? "[fail]" : "[warn]";
+        const detail = c.detail ? `  ${c.detail}` : "";
+        console.log(`  ${tag}  ${c.label}${detail}`);
+    }
+    // Env var summary
+    console.log("\nEnvironment:\n");
+    console.log(`  LEAP_MAX_SESSIONS   = ${process.env.LEAP_MAX_SESSIONS ?? "(default: 15)"}`);
+    console.log(`  LEAP_IDLE_TIMEOUT   = ${process.env.LEAP_IDLE_TIMEOUT ?? "(default: 300000)"}`);
+    console.log(`  LEAP_HEADLESS       = ${process.env.LEAP_HEADLESS ?? "(default: true)"}`);
+    console.log(`  LEAP_ALLOW_JS       = ${process.env.LEAP_ALLOW_JS ?? "(default: true)"}`);
+    console.log(`  LEAP_STEALTH        = ${process.env.LEAP_STEALTH ?? "(default: true)"}`);
+    console.log(`  LEAP_LOG_LEVEL      = ${process.env.LEAP_LOG_LEVEL ?? "(default: info)"}`);
+    console.log();
+    const failed = checks.some((c) => c.status === "fail");
+    process.exit(failed ? 1 : 0);
+}
+function printConfig() {
+    const config = {
+        leapfrog: {
+            command: "npx",
+            args: ["-y", "leapfrog"],
+            env: {
+                LEAP_MAX_SESSIONS: "15",
+            },
+        },
+    };
+    console.log("\nPaste this into your ~/.mcp.json:\n");
+    console.log(JSON.stringify(config, null, 2));
+    console.log();
+    process.exit(0);
+}
+function printVersion() {
+    console.log("0.1.0");
+    process.exit(0);
+}
 // ─── Startup ────────────────────────────────────────────────────────────────
 async function main() {
+    const args = process.argv.slice(2);
+    if (args.includes("--version") || args.includes("-v")) {
+        printVersion();
+        return;
+    }
+    if (args.includes("--config")) {
+        printConfig();
+        return;
+    }
+    if (args.includes("--doctor")) {
+        await runDoctor();
+        return;
+    }
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error(`HydraChrome MCP server running (max ${MAX_SESSIONS} sessions, headless=${HEADLESS})`);
+    console.error(`Leapfrog MCP server running (max ${MAX_SESSIONS} sessions, headless=${HEADLESS})`);
 }
 main().catch((e) => {
     console.error("Fatal:", e.message);

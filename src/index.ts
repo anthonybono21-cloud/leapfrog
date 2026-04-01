@@ -17,14 +17,14 @@ import type { Session } from "./types.js";
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
-const MAX_SESSIONS = Number(process.env.HYDRA_MAX_SESSIONS ?? 15);
-const IDLE_TIMEOUT_MS = Number(process.env.HYDRA_IDLE_TIMEOUT ?? 5 * 60 * 1000);
-if (!Number.isFinite(MAX_SESSIONS) || MAX_SESSIONS < 1) throw new Error("Invalid HYDRA_MAX_SESSIONS");
-if (!Number.isFinite(IDLE_TIMEOUT_MS) || IDLE_TIMEOUT_MS < 1000) throw new Error("Invalid HYDRA_IDLE_TIMEOUT");
-const HEADLESS = process.env.HYDRA_HEADLESS !== "false";
-const SCREENSHOT_DIR = path.join(os.homedir(), "Documents", "hydrachrome-screenshots");
+const MAX_SESSIONS = Number(process.env.LEAP_MAX_SESSIONS ?? 15);
+const IDLE_TIMEOUT_MS = Number(process.env.LEAP_IDLE_TIMEOUT ?? 5 * 60 * 1000);
+if (!Number.isFinite(MAX_SESSIONS) || MAX_SESSIONS < 1) throw new Error("Invalid LEAP_MAX_SESSIONS");
+if (!Number.isFinite(IDLE_TIMEOUT_MS) || IDLE_TIMEOUT_MS < 1000) throw new Error("Invalid LEAP_IDLE_TIMEOUT");
+const HEADLESS = process.env.LEAP_HEADLESS !== "false";
+const SCREENSHOT_DIR = path.join(os.homedir(), "Documents", "leapfrog-screenshots");
 const MAX_SNAPSHOT_CHARS = 10000;
-const ALLOW_JS = process.env.HYDRA_ALLOW_JS !== "false";
+const ALLOW_JS = process.env.LEAP_ALLOW_JS !== "false";
 
 const sessions = new SessionManager({
   maxSessions: MAX_SESSIONS,
@@ -70,7 +70,7 @@ async function snapAndFormat(session: Session, opts?: { selector?: string; maxCh
   return `[${session.id}] ${title}\n${url}\n${result.nodeCount} elements\n\n${result.text}`;
 }
 
-const PROFILE_DIR = path.join(os.homedir(), ".hydrachrome", "profiles");
+const PROFILE_DIR = path.join(os.homedir(), ".leapfrog", "profiles");
 
 // ─── SSRF Protection ───────────────────────────────────────────────────────
 
@@ -106,7 +106,7 @@ async function checkSSRF(hostname: string): Promise<string | null> {
 // ─── Server ─────────────────────────────────────────────────────────────────
 
 const server = new McpServer(
-  { name: "hydrachrome", version: "0.1.0" },
+  { name: "leapfrog", version: "0.1.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -550,7 +550,7 @@ server.registerTool(
           break;
         case "js": {
           if (!js) return err("type='js' requires a js expression.");
-          if (!ALLOW_JS) return err("JavaScript evaluation is disabled. Set HYDRA_ALLOW_JS=true to enable.");
+          if (!ALLOW_JS) return err("JavaScript evaluation is disabled. Set LEAP_ALLOW_JS=true to enable.");
           let val: unknown;
           try {
             val = await Promise.race([
@@ -764,7 +764,7 @@ server.registerTool(
     try {
       const session = requireSession(sessionId);
       if (condition === "js" && !ALLOW_JS) {
-        return err("JavaScript evaluation is disabled. Set HYDRA_ALLOW_JS=true to enable.");
+        return err("JavaScript evaluation is disabled. Set LEAP_ALLOW_JS=true to enable.");
       }
       const page = getPage(session);
       await tabManager.waitFor(page, session, { type: condition, target, text, js, timeout });
@@ -959,7 +959,7 @@ async function runDoctor(): Promise<void> {
   }
 
   // Print results
-  console.log("\nHydraChrome Doctor\n");
+  console.log("\nLeapfrog Doctor\n");
   for (const c of checks) {
     const tag = c.status === "pass" ? "[pass]" : c.status === "fail" ? "[fail]" : "[warn]";
     const detail = c.detail ? `  ${c.detail}` : "";
@@ -968,12 +968,12 @@ async function runDoctor(): Promise<void> {
 
   // Env var summary
   console.log("\nEnvironment:\n");
-  console.log(`  HYDRA_MAX_SESSIONS   = ${process.env.HYDRA_MAX_SESSIONS ?? "(default: 15)"}`);
-  console.log(`  HYDRA_IDLE_TIMEOUT   = ${process.env.HYDRA_IDLE_TIMEOUT ?? "(default: 300000)"}`);
-  console.log(`  HYDRA_HEADLESS       = ${process.env.HYDRA_HEADLESS ?? "(default: true)"}`);
-  console.log(`  HYDRA_ALLOW_JS       = ${process.env.HYDRA_ALLOW_JS ?? "(default: true)"}`);
-  console.log(`  HYDRA_STEALTH        = ${process.env.HYDRA_STEALTH ?? "(default: true)"}`);
-  console.log(`  HYDRA_LOG_LEVEL      = ${process.env.HYDRA_LOG_LEVEL ?? "(default: info)"}`);
+  console.log(`  LEAP_MAX_SESSIONS   = ${process.env.LEAP_MAX_SESSIONS ?? "(default: 15)"}`);
+  console.log(`  LEAP_IDLE_TIMEOUT   = ${process.env.LEAP_IDLE_TIMEOUT ?? "(default: 300000)"}`);
+  console.log(`  LEAP_HEADLESS       = ${process.env.LEAP_HEADLESS ?? "(default: true)"}`);
+  console.log(`  LEAP_ALLOW_JS       = ${process.env.LEAP_ALLOW_JS ?? "(default: true)"}`);
+  console.log(`  LEAP_STEALTH        = ${process.env.LEAP_STEALTH ?? "(default: true)"}`);
+  console.log(`  LEAP_LOG_LEVEL      = ${process.env.LEAP_LOG_LEVEL ?? "(default: info)"}`);
   console.log();
 
   const failed = checks.some((c) => c.status === "fail");
@@ -982,11 +982,11 @@ async function runDoctor(): Promise<void> {
 
 function printConfig(): void {
   const config = {
-    hydrachrome: {
+    leapfrog: {
       command: "npx",
-      args: ["-y", "hydrachrome"],
+      args: ["-y", "leapfrog"],
       env: {
-        HYDRA_MAX_SESSIONS: "15",
+        LEAP_MAX_SESSIONS: "15",
       },
     },
   };
@@ -1023,7 +1023,7 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`HydraChrome MCP server running (max ${MAX_SESSIONS} sessions, headless=${HEADLESS})`);
+  console.error(`Leapfrog MCP server running (max ${MAX_SESSIONS} sessions, headless=${HEADLESS})`);
 }
 
 main().catch((e) => {

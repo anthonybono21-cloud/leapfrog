@@ -3,7 +3,7 @@
 // Zero-dependency structured logger that writes JSON to stderr.
 // MCP servers use stderr for logging (stdout is reserved for the protocol).
 //
-// Control verbosity via HYDRA_LOG_LEVEL env var: debug | info | warn | error
+// Control verbosity via LEAP_LOG_LEVEL env var: debug | info | warn | error
 // Default: info
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -19,7 +19,7 @@ class Logger {
   private minLevel: LogLevel;
 
   constructor() {
-    const envLevel = process.env.HYDRA_LOG_LEVEL as LogLevel | undefined;
+    const envLevel = process.env.LEAP_LOG_LEVEL as LogLevel | undefined;
     this.minLevel =
       envLevel && envLevel in LOG_LEVELS ? envLevel : 'info';
   }

@@ -1,7 +1,7 @@
 // ─── Anti-Bot Evasion ─────────────────────────────────────────────────────
 //
 // Stealth patches for headless Chromium to avoid bot detection.
-// Enabled by default. Disable with HYDRA_STEALTH=false.
+// Enabled by default. Disable with LEAP_STEALTH=false.
 //
 // Standalone module — no cross-dependencies on logger or session-manager.
 
@@ -193,10 +193,10 @@ export class StealthMode {
 
   /**
    * Whether stealth mode is enabled.
-   * Returns true unless HYDRA_STEALTH=false is set.
+   * Returns true unless LEAP_STEALTH=false is set.
    */
   isEnabled(): boolean {
-    return process.env.HYDRA_STEALTH !== "false";
+    return process.env.LEAP_STEALTH !== "false";
   }
 
   /**

@@ -11,7 +11,7 @@ import * as os from 'os';
 // validation logic here and test it in isolation.
 // ---------------------------------------------------------------------------
 
-const PROFILE_DIR = path.join(os.homedir(), '.hydrachrome', 'profiles');
+const PROFILE_DIR = path.join(os.homedir(), '.leapfrog', 'profiles');
 
 // ── URL validation (mirrors the navigate tool handler) ──────────────
 

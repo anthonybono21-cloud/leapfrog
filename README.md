@@ -1,122 +1,162 @@
-# HydraChrome
+<p align="center">
+<pre align="center">
+       ╱▔▔▔╲
+      ▕ ●  ● ▏
+      ╰╲ ▽▽ ╱╯
+    ╱▔▔▔▔╲╱▔▔▔▔╲
+   ▕ ░░░░░░░░░░░ ▏
+    ╲▁▁▁╱  ╲▁▁▁╱
+     ╱╱      ╲╲
+</pre>
+</p>
 
-Multi-session browser MCP for AI agents. 19 tools. 5-10x fewer tokens than Playwright MCP.
+<h1 align="center">Leapfrog</h1>
+<p align="center"><strong>Multi-session browser MCP for AI agents.</strong><br/>19 tools. 15 parallel sessions. 10x fewer tokens.</p>
 
-## Token Savings
+<p align="center">
+<code>npm i leapfrog</code>&nbsp;&nbsp;|&nbsp;&nbsp;Works with Claude Code, Cursor, Windsurf
+</p>
 
-| Site | Playwright MCP | HydraChrome | Savings |
-|------|---------------|-------------|---------|
-| Average page | ~15,000 tokens | ~1,200 tokens | **10x** |
+---
 
-## What It Does
+## The Problem
 
-- **15 parallel isolated browser sessions** -- separate cookies, storage, and state per session. No cross-contamination.
-- **Compact @eN ref snapshots** -- agents click by ref (`@e3`), not CSS selector. Snapshots run 200-500 tokens instead of 15,000.
-- **Network intelligence** -- see every API call, intercept traffic, mock responses, capture console errors.
+Playwright MCP sends **~15,000 tokens per page** to your agent. Most of that is noise. Your context window fills up. Your agent gets confused. You pay for it.
 
-## Feature Matrix
+Leapfrog sends **~1,200 tokens**. Same page. Same information. Just the parts that matter.
 
-| Feature | HydraChrome | Playwright MCP | agent-browser |
-|---------|-------------|---------------|---------------|
-| Multi-session isolation | 15 parallel | No (tabs fight) | No (single) |
-| Token efficiency | ~1,200/page | ~15,000/page | ~300/page |
-| Network interception | Yes | No | No |
-| Stealth mode | Yes | No | No |
-| Multi-tab/popup | Yes | No | No |
-| Console capture | Yes | Yes | No |
-| Crash recovery | Yes | No | No |
+```
+┌─────────────────────────────────────────────────────┐
+│  Playwright MCP                                     │
+│  ████████████████████████████████████████  ~15,000   │
+│                                                     │
+│  Leapfrog                                           │
+│  ████                                     ~1,200    │
+└─────────────────────────────────────────────────────┘
+                    per page snapshot
+```
 
 ## Quick Start
 
 ```bash
-npx hydrachrome --doctor   # verify setup
-npx hydrachrome --config   # get MCP config to paste
+npx leapfrog --doctor   # verify everything works
+npx leapfrog --config   # print MCP config to paste
 ```
 
-Add to `~/.mcp.json`:
+Add to `~/.mcp.json` (Claude Code) or your editor's MCP config:
 
 ```json
 {
-  "hydrachrome": {
+  "leapfrog": {
     "command": "npx",
-    "args": ["-y", "hydrachrome"],
+    "args": ["-y", "leapfrog"],
     "env": {
-      "HYDRA_MAX_SESSIONS": "15"
+      "LEAP_MAX_SESSIONS": "15"
     }
   }
 }
 ```
 
-Chromium installs automatically via `postinstall`. If it fails, run manually:
+Chromium installs automatically. If it fails: `npx playwright install chromium`
 
-```bash
-npx playwright install chromium
-```
+## Feature Matrix
 
-## Tools (19)
+| | Leapfrog | Playwright MCP | agent-browser |
+|---|:---:|:---:|:---:|
+| Tokens per page | **~1,200** | ~15,000 | ~300 |
+| Parallel sessions | **15** | 1 | 1 |
+| Session isolation | Yes | No | No |
+| Multi-tab / popups | Yes | No | No |
+| Network intercept | Yes | No | No |
+| Console capture | Yes | Yes | No |
+| Stealth / anti-bot | Yes | No | No |
+| Smart wait (5 types) | Yes | Basic | No |
+| Crash recovery | Yes | No | No |
+| Auth profile reuse | Yes | No | No |
+| SSRF protection | Yes | No | No |
 
-### Session Management
+## The Ecosystem
 
-| Tool | Description |
-|------|-------------|
-| `session_create` | Create an isolated browser session with its own cookies and state |
-| `session_destroy` | Close and clean up a session, freeing a pool slot |
-| `session_list` | List all active sessions with URLs and idle times |
-| `session_save_profile` | Save cookies/auth state to disk for reuse across sessions |
-| `session_list_profiles` | List all saved authentication profiles |
-| `pool_status` | Pool stats, memory usage, uptime, and session summaries |
-| `session_health` | Check if sessions are healthy (browser connected, page responsive) |
+Leapfrog speaks in pond metaphors. Your agent is the frog.
 
-### Navigation and Interaction
+| Concept | Leapfrog term | What it means |
+|---|---|---|
+| Sessions | **Ponds** | Isolated browser contexts (cookies, storage, state) |
+| Tabs | **Pads** | Lily pads -- where the frog lands within a pond |
+| Navigate | **Leap** | Jump to a URL, get a compact snapshot back |
+| Snapshots | **Splash** | What you see when you land -- interactive `@eN` refs |
+| Network traffic | **Ripple** | HTTP requests under the surface |
+| Console errors | **Croak** | Something went wrong in the browser |
+| Stealth mode | **Camouflage** | Anti-bot evasion patches |
 
-| Tool | Description |
-|------|-------------|
-| `navigate` | Go to a URL and return a compact @eN ref snapshot |
-| `snapshot` | Re-snapshot the current page for fresh refs (scope with CSS selector) |
+## All 19 Tools
+
+### Pond Management (7)
+
+| Tool | What it does |
+|---|---|
+| `session_create` | Open a new pond -- isolated cookies, state, viewport |
+| `session_destroy` | Drain a pond and free the slot |
+| `session_list` | See all active ponds with URLs and idle times |
+| `session_save_profile` | Save auth state to disk for future ponds |
+| `session_list_profiles` | List saved auth profiles |
+| `pool_status` | Pool stats, memory, uptime |
+| `session_health` | Is the pond healthy? Browser connected, page responsive? |
+
+### Leaping & Splashing (6)
+
+| Tool | What it does |
+|---|---|
+| `navigate` | Leap to a URL, return a compact `@eN` snapshot |
+| `snapshot` | Re-splash the current page (scope with CSS selector) |
 | `act` | Click, fill, type, check, select, press, scroll, hover, back, forward |
-| `wait_for` | Wait for element, text, network idle, navigation, or JS expression |
-| `screenshot` | Capture a PNG screenshot (full page or element) |
-| `extract` | Pull text, HTML, title, URL, or evaluate JS on the page |
+| `wait_for` | Wait for element / text / network idle / navigation / JS expression |
+| `screenshot` | Capture PNG (full page or element) |
+| `extract` | Pull text, HTML, title, URL, or evaluate JS |
 
-### Tab Management
+### Pad Management (3)
 
-| Tool | Description |
-|------|-------------|
-| `tabs_list` | List all open tabs with index, URL, and active status |
-| `tab_switch` | Switch to a tab by index (-1 for most recent popup) |
-| `tab_close` | Close a tab by index (cannot close the last tab) |
+| Tool | What it does |
+|---|---|
+| `tabs_list` | List all pads in a pond |
+| `tab_switch` | Hop to another pad (-1 for most recent popup) |
+| `tab_close` | Close a pad (can't close the last one) |
 
-### Network Intelligence
+### Ripple Intelligence (3)
 
-| Tool | Description |
-|------|-------------|
-| `network_log` | View HTTP traffic with filters for URL, method, status, content-type |
-| `console_log` | View browser console messages filtered by level |
-| `network_intercept` | Block, mock, or log network requests by URL pattern |
+| Tool | What it does |
+|---|---|
+| `network_log` | See HTTP traffic -- filter by URL, method, status, content-type |
+| `console_log` | Read croaks -- browser console filtered by level |
+| `network_intercept` | Block, mock, or log requests by URL pattern |
+
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `LEAP_MAX_SESSIONS` | `15` | Max concurrent ponds |
+| `LEAP_IDLE_TIMEOUT` | `300000` | Pond idle timeout in ms (5 min) |
+| `LEAP_HEADLESS` | `true` | Set `false` to watch the browser |
+| `LEAP_ALLOW_JS` | `true` | Allow JS evaluation in `extract` and `wait_for` |
+| `LEAP_STEALTH` | `true` | Camouflage mode (anti-bot evasion) |
+| `LEAP_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 
 ## Tests
 
-52 tests passing across session management, snapshot engine, and security (SSRF protection, URL scheme blocking, path traversal).
+```
+ 74 passing across 5 suites
+```
+
+Session management, snapshot engine, network intelligence, tab management, security (SSRF, URL scheme blocking, path traversal).
 
 ```bash
 npm test
 ```
 
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HYDRA_MAX_SESSIONS` | `15` | Maximum concurrent browser sessions |
-| `HYDRA_IDLE_TIMEOUT` | `300000` | Session idle timeout in ms (default 5 min) |
-| `HYDRA_HEADLESS` | `true` | Run browsers headless. Set `false` to watch. |
-| `HYDRA_ALLOW_JS` | `true` | Allow `extract` type=js and `wait_for` condition=js |
-| `HYDRA_STEALTH` | `true` | Anti-detection patches (WebDriver flag, plugins, etc.) |
-| `HYDRA_LOG_LEVEL` | `info` | Log verbosity: debug, info, warn, error |
-
 ## Requirements
 
 - Node.js >= 18
-- Chromium (installed automatically via Playwright)
+- Chromium (auto-installed via Playwright)
 
 ## License
 

@@ -748,7 +748,7 @@ describe("Capacity summary", () => {
   it("prints the final capacity report", () => {
     const mem = memoryMB();
     console.log("\n══════════════════════════════════════════════════════");
-    console.log("  HYDRACHROME STRESS TEST — CAPACITY REPORT");
+    console.log("  LEAPFROG STRESS TEST — CAPACITY REPORT");
     console.log("══════════════════════════════════════════════════════");
     console.log(`  Default MAX_SESSIONS env: 15`);
     console.log(`  Default maxSessions code: 10`);
