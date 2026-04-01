@@ -14,7 +14,6 @@ export class StealthMode {
   getLaunchArgs(): string[] {
     return [
       "--disable-blink-features=AutomationControlled",
-      "--disable-features=IsolateOrigins,site-per-process",
       "--disable-dev-shm-usage",
       "--no-first-run",
       "--no-default-browser-check",

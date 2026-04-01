@@ -5,11 +5,14 @@ import { z } from "zod";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
+import * as dns from "dns/promises";
+import * as net from "net";
 import { SessionManager } from "./session-manager.js";
 import { SnapshotEngine } from "./snapshot-engine.js";
 import { networkIntelligence } from "./network-intelligence.js";
 import { tabManager } from "./tab-manager.js";
 import { crashRecovery } from "./crash-recovery.js";
+import { logger } from "./logger.js";
 // ─── Config ─────────────────────────────────────────────────────────────────
 const MAX_SESSIONS = Number(process.env.HYDRA_MAX_SESSIONS ?? 15);
 const IDLE_TIMEOUT_MS = Number(process.env.HYDRA_IDLE_TIMEOUT ?? 5 * 60 * 1000);
@@ -60,6 +63,35 @@ async function snapAndFormat(session, opts) {
     return `[${session.id}] ${title}\n${url}\n${result.nodeCount} elements\n\n${result.text}`;
 }
 const PROFILE_DIR = path.join(os.homedir(), ".hydrachrome", "profiles");
+// ─── SSRF Protection ───────────────────────────────────────────────────────
+const BLOCKED_IP_RANGES = [
+    /^127\./, /^10\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./,
+    /^169\.254\./, /^0\./, /^::1$/, /^fc00:/, /^fe80:/, /^fd/,
+];
+function isInternalIP(ip) {
+    return BLOCKED_IP_RANGES.some((r) => r.test(ip));
+}
+async function checkSSRF(hostname) {
+    // Direct IP check
+    if (net.isIP(hostname)) {
+        if (isInternalIP(hostname))
+            return `Blocked: ${hostname} is an internal IP address.`;
+        return null;
+    }
+    // DNS resolution check (catches DNS rebinding)
+    try {
+        const addresses = await dns.resolve4(hostname);
+        for (const addr of addresses) {
+            if (isInternalIP(addr)) {
+                return `Blocked: ${hostname} resolves to internal IP ${addr}.`;
+            }
+        }
+    }
+    catch {
+        // DNS failure — let the browser handle it (will show its own error)
+    }
+    return null;
+}
 // ─── Server ─────────────────────────────────────────────────────────────────
 const server = new McpServer({ name: "hydrachrome", version: "0.1.0" }, { capabilities: { tools: {} } });
 // ─── session_create ─────────────────────────────────────────────────────────
@@ -213,6 +245,12 @@ server.registerTool("navigate", {
         }
         if (!["http:", "https:"].includes(parsed.protocol)) {
             return err(`Blocked URL scheme: ${parsed.protocol} — only http/https allowed.`);
+        }
+        // SSRF protection — block internal IPs and cloud metadata
+        const ssrfBlock = await checkSSRF(parsed.hostname);
+        if (ssrfBlock) {
+            logger.warn("security.ssrf_blocked", { url, hostname: parsed.hostname });
+            return err(ssrfBlock);
         }
         const session = requireSession(sessionId);
         await getPage(session).goto(url, { waitUntil });
@@ -624,6 +662,9 @@ server.registerTool("wait_for", {
 }, async ({ sessionId, condition, target, text, js, timeout }) => {
     try {
         const session = requireSession(sessionId);
+        if (condition === "js" && !ALLOW_JS) {
+            return err("JavaScript evaluation is disabled. Set HYDRA_ALLOW_JS=true to enable.");
+        }
         const page = getPage(session);
         await tabManager.waitFor(page, session, { type: condition, target, text, js, timeout });
         const snap = await snapAndFormat(session);
