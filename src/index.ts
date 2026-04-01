@@ -11,11 +11,14 @@ import type { Session } from "./types.js";
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
-const MAX_SESSIONS = parseInt(process.env.HYDRA_MAX_SESSIONS ?? "15");
-const IDLE_TIMEOUT_MS = parseInt(process.env.HYDRA_IDLE_TIMEOUT ?? String(5 * 60 * 1000));
+const MAX_SESSIONS = Number(process.env.HYDRA_MAX_SESSIONS ?? 15);
+const IDLE_TIMEOUT_MS = Number(process.env.HYDRA_IDLE_TIMEOUT ?? 5 * 60 * 1000);
+if (!Number.isFinite(MAX_SESSIONS) || MAX_SESSIONS < 1) throw new Error("Invalid HYDRA_MAX_SESSIONS");
+if (!Number.isFinite(IDLE_TIMEOUT_MS) || IDLE_TIMEOUT_MS < 1000) throw new Error("Invalid HYDRA_IDLE_TIMEOUT");
 const HEADLESS = process.env.HYDRA_HEADLESS !== "false";
 const SCREENSHOT_DIR = path.join(os.homedir(), "Documents", "hydrachrome-screenshots");
 const MAX_SNAPSHOT_CHARS = 10000;
+const ALLOW_JS = process.env.HYDRA_ALLOW_JS !== "false";
 
 const sessions = new SessionManager({
   maxSessions: MAX_SESSIONS,
@@ -56,6 +59,8 @@ async function snapAndFormat(session: Session, opts?: { selector?: string; maxCh
   return `[${session.id}] ${title}\n${url}\n${result.nodeCount} elements\n\n${result.text}`;
 }
 
+const PROFILE_DIR = path.join(os.homedir(), ".hydrachrome", "profiles");
+
 // ─── Server ─────────────────────────────────────────────────────────────────
 
 const server = new McpServer(
@@ -88,6 +93,18 @@ server.registerTool(
   },
   async ({ profilePath, viewport, userAgent }) => {
     try {
+      // Validate profilePath stays within the profiles directory
+      if (profilePath) {
+        const resolved = path.resolve(profilePath);
+        if (!resolved.startsWith(path.resolve(PROFILE_DIR))) {
+          return err(`profilePath must be within ${PROFILE_DIR}`);
+        }
+        try {
+          await fs.access(resolved);
+        } catch {
+          return err(`Profile not found: ${resolved}`);
+        }
+      }
       const session = await sessions.createSession({ profilePath, viewport, userAgent });
       const stats = sessions.getStats();
       return ok(
@@ -150,8 +167,6 @@ server.registerTool(
 
 // ─── session_save_profile ───────────────────────────────────────────────────
 
-const PROFILE_DIR = path.join(os.homedir(), ".hydrachrome", "profiles");
-
 server.registerTool(
   "session_save_profile",
   {
@@ -167,11 +182,17 @@ server.registerTool(
   },
   async ({ sessionId, name }) => {
     try {
+      // Sanitize profile name — alphanumeric, dash, underscore only
+      const safeName = name.replace(/[^a-zA-Z0-9_-]/g, "");
+      if (!safeName) return err("Invalid profile name. Use alphanumeric, dash, or underscore characters.");
       const session = requireSession(sessionId);
-      await fs.mkdir(PROFILE_DIR, { recursive: true });
-      const filepath = path.join(PROFILE_DIR, `${name}.json`);
+      await fs.mkdir(PROFILE_DIR, { recursive: true, mode: 0o700 });
+      const filepath = path.resolve(PROFILE_DIR, `${safeName}.json`);
+      if (!filepath.startsWith(path.resolve(PROFILE_DIR))) {
+        return err("Invalid profile path.");
+      }
       const state = await session.context.storageState();
-      await fs.writeFile(filepath, JSON.stringify(state, null, 2));
+      await fs.writeFile(filepath, JSON.stringify(state, null, 2), { mode: 0o600 });
       return ok(`Profile saved: ${filepath}\nUse with session_create profilePath="${filepath}"`);
     } catch (e: any) {
       return err(`Save failed: ${e.message}`);
@@ -227,6 +248,17 @@ server.registerTool(
   },
   async ({ sessionId, url, waitUntil }) => {
     try {
+      // Block dangerous URL schemes
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        return err(`Invalid URL: ${url}`);
+      }
+      if (!["http:", "https:"].includes(parsed.protocol)) {
+        return err(`Blocked URL scheme: ${parsed.protocol} — only http/https allowed.`);
+      }
+
       const session = requireSession(sessionId);
       await session.page.goto(url, { waitUntil });
       const text = await snapAndFormat(session);
@@ -468,8 +500,21 @@ server.registerTool(
           break;
         case "js": {
           if (!js) return err("type='js' requires a js expression.");
-          const val = await page.evaluate(js);
-          result = typeof val === "string" ? val : JSON.stringify(val, null, 2);
+          if (!ALLOW_JS) return err("JavaScript evaluation is disabled. Set HYDRA_ALLOW_JS=true to enable.");
+          let val: unknown;
+          try {
+            val = await Promise.race([
+              page.evaluate(js),
+              new Promise((_, reject) => setTimeout(() => reject(new Error("JS evaluation timed out (10s)")), 10000)),
+            ]);
+          } catch (evalErr: any) {
+            return err(`JS eval failed: ${evalErr.message}`);
+          }
+          if (val === undefined || val === null) {
+            result = String(val);
+          } else {
+            result = typeof val === "string" ? val : JSON.stringify(val, null, 2);
+          }
           break;
         }
         case "text": {

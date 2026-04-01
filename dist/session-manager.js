@@ -93,6 +93,8 @@ export class SessionManager {
         }
         const context = await browser.newContext(contextOpts);
         const page = await context.newPage();
+        // Auto-dismiss browser dialogs (alert, confirm, prompt) to prevent session hangs
+        page.on("dialog", (dialog) => dialog.dismiss().catch(() => { }));
         // Generate a unique short ID
         let id;
         do {
