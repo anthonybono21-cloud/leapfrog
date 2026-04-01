@@ -148,6 +148,64 @@ server.registerTool(
   },
 );
 
+// ─── session_save_profile ───────────────────────────────────────────────────
+
+const PROFILE_DIR = path.join(os.homedir(), ".hydrachrome", "profiles");
+
+server.registerTool(
+  "session_save_profile",
+  {
+    title: "Save Session Profile",
+    description:
+      "Save a session's cookies and auth state to disk. " +
+      "Use this after logging in to a site so future sessions can restore that login. " +
+      "Pass the returned profile path to session_create's profilePath to reuse it.",
+    inputSchema: z.object({
+      sessionId: z.string().describe("Session ID to save."),
+      name: z.string().describe("Profile name (e.g. 'google', 'github'). Overwrites if exists."),
+    }),
+  },
+  async ({ sessionId, name }) => {
+    try {
+      const session = requireSession(sessionId);
+      await fs.mkdir(PROFILE_DIR, { recursive: true });
+      const filepath = path.join(PROFILE_DIR, `${name}.json`);
+      const state = await session.context.storageState();
+      await fs.writeFile(filepath, JSON.stringify(state, null, 2));
+      return ok(`Profile saved: ${filepath}\nUse with session_create profilePath="${filepath}"`);
+    } catch (e: any) {
+      return err(`Save failed: ${e.message}`);
+    }
+  },
+);
+
+// ─── session_list_profiles ──────────────────────────────────────────────────
+
+server.registerTool(
+  "session_list_profiles",
+  {
+    title: "List Saved Profiles",
+    description: "List all saved authentication profiles.",
+    inputSchema: z.object({}),
+  },
+  async () => {
+    try {
+      await fs.mkdir(PROFILE_DIR, { recursive: true });
+      const files = await fs.readdir(PROFILE_DIR);
+      const profiles = files.filter((f) => f.endsWith(".json"));
+      if (profiles.length === 0) return ok("No saved profiles.");
+
+      const lines = profiles.map((f) => {
+        const name = f.replace(".json", "");
+        return `${name}  →  ${path.join(PROFILE_DIR, f)}`;
+      });
+      return ok(lines.join("\n"));
+    } catch (e: any) {
+      return err(`List failed: ${e.message}`);
+    }
+  },
+);
+
 // ─── navigate ───────────────────────────────────────────────────────────────
 
 server.registerTool(
@@ -440,6 +498,39 @@ server.registerTool(
     } catch (e: any) {
       return err(`Extract failed: ${e.message}`);
     }
+  },
+);
+
+// ─── pool_status ────────────────────────────────────────────────────────────
+
+server.registerTool(
+  "pool_status",
+  {
+    title: "Pool Status & Resources",
+    description: "Show pool stats, resource usage (memory, uptime), and all active session summaries.",
+    inputSchema: z.object({}),
+  },
+  async () => {
+    const stats = sessions.getStats();
+    const resources = sessions.getResourceUsage();
+    const list = sessions.listSessions();
+
+    const lines = [
+      `Sessions: ${stats.active}/${stats.maxSessions} (${stats.totalCreated} total created)`,
+      `Memory: ${resources.heapUsedMB}MB heap / ${resources.rssMB}MB RSS`,
+      `Uptime: ${resources.uptimeSeconds}s`,
+    ];
+
+    if (list.length > 0) {
+      lines.push("", "Active sessions:");
+      const now = Date.now();
+      for (const s of list) {
+        const idle = Math.round((now - s.lastUsedAt) / 1000);
+        lines.push(`  ${s.id}  ${s.url || "(blank)"}  idle ${idle}s`);
+      }
+    }
+
+    return ok(lines.join("\n"));
   },
 );
 

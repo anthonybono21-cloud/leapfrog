@@ -225,6 +225,16 @@ export class SessionManager implements ISessionManager {
       totalCreated: this.totalCreated,
     };
   }
+
+  getResourceUsage(): { heapUsedMB: number; rssMB: number; sessionsActive: number; uptimeSeconds: number } {
+    const mem = process.memoryUsage();
+    return {
+      heapUsedMB: Math.round(mem.heapUsed / 1024 / 1024),
+      rssMB: Math.round(mem.rss / 1024 / 1024),
+      sessionsActive: this.sessions.size,
+      uptimeSeconds: Math.round(process.uptime()),
+    };
+  }
 }
 
 export default SessionManager;
