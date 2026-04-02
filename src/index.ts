@@ -352,13 +352,15 @@ server.registerTool(
   {
     title: "Browser Action",
     description:
-      "Perform a browser interaction: click, fill, type, check, select, press key, scroll, hover, back, forward. " +
+      "Perform a browser interaction: click, fill, type, check, select, press key, scroll, hover, drag, upload, resize, back, forward. " +
       "Use @eN refs from navigate/snapshot as the target (e.g. '@e2'). CSS selectors also work. " +
+      "drag: requires target (source) and target2 (destination). upload: requires target (file input) and filePaths. " +
+      "resize: requires width and height (no target needed). " +
       "Returns a fresh snapshot if the page navigated, or just the action result if it didn't.",
     inputSchema: z.object({
       sessionId: z.string().describe("Session ID."),
       action: z
-        .enum(["click", "dblclick", "fill", "type", "check", "uncheck", "select", "press", "scroll", "hover", "back", "forward"])
+        .enum(["click", "dblclick", "fill", "type", "check", "uncheck", "select", "press", "scroll", "hover", "drag", "upload", "resize", "back", "forward"])
         .describe("Interaction to perform."),
       target: z
         .string()
@@ -374,9 +376,19 @@ server.registerTool(
         .optional()
         .describe("Scroll direction. Default: down."),
       scrollAmount: z.number().int().optional().describe("Pixels to scroll. Default: 300."),
+      target2: z
+        .string()
+        .optional()
+        .describe("Drop destination for drag action. @eN ref or CSS selector."),
+      filePaths: z
+        .union([z.string(), z.array(z.string())])
+        .optional()
+        .describe("File path(s) for upload action. Single string or array of strings."),
+      width: z.number().int().optional().describe("Viewport width for resize action."),
+      height: z.number().int().optional().describe("Viewport height for resize action."),
     }),
   },
-  async ({ sessionId, action, target, value, key, scrollDirection, scrollAmount }) => {
+  async ({ sessionId, action, target, value, key, scrollDirection, scrollAmount, target2, filePaths, width, height }) => {
     try {
       const session = requireSession(sessionId);
       const page = getPage(session);
@@ -440,6 +452,26 @@ server.registerTool(
             const deltaY = dir === "down" ? px : dir === "up" ? -px : 0;
             await page.mouse.wheel(deltaX, deltaY);
           }
+          break;
+        }
+        case "drag": {
+          if (!target) return err("'drag' requires a target (source element)");
+          if (!target2) return err("'drag' requires target2 (drop destination)");
+          const source = resolve(target);
+          const dest = resolve(target2);
+          await source.dragTo(dest);
+          break;
+        }
+        case "upload": {
+          if (!target) return err("'upload' requires a target (file input element)");
+          if (!filePaths) return err("'upload' requires filePaths");
+          const paths = Array.isArray(filePaths) ? filePaths : [filePaths];
+          await resolve(target).setInputFiles(paths);
+          break;
+        }
+        case "resize": {
+          if (width === undefined || height === undefined) return err("'resize' requires width and height");
+          await page.setViewportSize({ width, height });
           break;
         }
         case "back":
