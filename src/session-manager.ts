@@ -159,12 +159,35 @@ export class SessionManager implements ISessionManager {
 
     const viewport = opts?.viewport ?? this.config.defaultViewport;
 
+    // Determine if stealth applies: per-session flag overrides global env
+    const useStealth = opts?.stealth !== undefined ? opts.stealth : stealth.isEnabled();
+
     // Build context options — merge stealth defaults
-    const stealthOpts = stealth.isEnabled() ? stealth.getContextOptions(opts?.userAgent) : {};
+    const stealthOpts = useStealth ? stealth.getContextOptions(opts?.userAgent) : {};
     const contextOpts: Record<string, unknown> = { viewport, ...stealthOpts };
 
     if (opts?.userAgent) {
       contextOpts.userAgent = opts.userAgent;
+    }
+
+    // Extended context options for humanization
+    if (opts?.locale) {
+      contextOpts.locale = opts.locale;
+    }
+    if (opts?.timezoneId) {
+      contextOpts.timezoneId = opts.timezoneId;
+    }
+    if (opts?.geolocation) {
+      contextOpts.geolocation = opts.geolocation;
+    }
+    if (opts?.permissions) {
+      contextOpts.permissions = opts.permissions;
+    }
+    if (opts?.colorScheme) {
+      contextOpts.colorScheme = opts.colorScheme;
+    }
+    if (opts?.acceptDownloads !== undefined) {
+      contextOpts.acceptDownloads = opts.acceptDownloads;
     }
 
     if (opts?.storageState) {
@@ -182,7 +205,7 @@ export class SessionManager implements ISessionManager {
 
     // Apply stealth init scripts to evade bot detection
     // Pass userAgent so platform inference (P2 #9) matches the UA string
-    if (stealth.isEnabled()) {
+    if (useStealth) {
       await stealth.applyToPage(page, opts?.userAgent);
     }
 

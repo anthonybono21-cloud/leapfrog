@@ -91,11 +91,32 @@ export class SessionManager {
         }
         const browser = await this.ensureBrowser();
         const viewport = opts?.viewport ?? this.config.defaultViewport;
+        // Determine if stealth applies: per-session flag overrides global env
+        const useStealth = opts?.stealth !== undefined ? opts.stealth : stealth.isEnabled();
         // Build context options — merge stealth defaults
-        const stealthOpts = stealth.isEnabled() ? stealth.getContextOptions(opts?.userAgent) : {};
+        const stealthOpts = useStealth ? stealth.getContextOptions(opts?.userAgent) : {};
         const contextOpts = { viewport, ...stealthOpts };
         if (opts?.userAgent) {
             contextOpts.userAgent = opts.userAgent;
+        }
+        // Extended context options for humanization
+        if (opts?.locale) {
+            contextOpts.locale = opts.locale;
+        }
+        if (opts?.timezoneId) {
+            contextOpts.timezoneId = opts.timezoneId;
+        }
+        if (opts?.geolocation) {
+            contextOpts.geolocation = opts.geolocation;
+        }
+        if (opts?.permissions) {
+            contextOpts.permissions = opts.permissions;
+        }
+        if (opts?.colorScheme) {
+            contextOpts.colorScheme = opts.colorScheme;
+        }
+        if (opts?.acceptDownloads !== undefined) {
+            contextOpts.acceptDownloads = opts.acceptDownloads;
         }
         if (opts?.storageState) {
             try {
@@ -111,16 +132,11 @@ export class SessionManager {
         const context = await browser.newContext(contextOpts);
         const page = await context.newPage();
         // Apply stealth init scripts to evade bot detection
-        // Pass userAgent so platform inference (P2 #9) matches the UA string
-        if (stealth.isEnabled()) {
-            await stealth.applyToPage(page, opts?.userAgent);
+        if (useStealth) {
+            await stealth.applyToPage(page);
         }
         // Auto-dismiss browser dialogs (alert, confirm, prompt) to prevent session hangs
-        // P1 #6: Add 200-500ms random delay — instant dismiss (< 30ms) is a headless signal
-        page.on("dialog", (dialog) => {
-            const delay = stealth.isEnabled() ? stealth.getDialogDelay() : 0;
-            setTimeout(() => dialog.dismiss().catch(() => { }), delay);
-        });
+        page.on("dialog", (dialog) => dialog.dismiss().catch(() => { }));
         // Generate a unique short ID
         let id;
         do {
