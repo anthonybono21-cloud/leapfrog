@@ -1,21 +1,9 @@
 <p align="center">
-<pre align="center">
-        @..@
-       (----)
-      / >  < \
-     |        |
-     | \    / |
-     \  '--'  /
-      '.    .'
-     /| `--` |\
-    / |        | \
-   '  '.____.'  '
-        |  |
-</pre>
+<img src="hero.png" alt="Leapfrog" width="400" />
 </p>
 
 <h1 align="center">Leapfrog</h1>
-<p align="center"><strong>Multi-session browser MCP for AI agents.</strong><br/>19 tools. 15 parallel sessions. Up to 10x fewer tokens.</p>
+<p align="center"><strong>Multi-session browser MCP for AI agents.</strong><br/>21 tools. 15 parallel sessions. Stealth. Humanization. Up to 10x fewer tokens.</p>
 
 <p align="center">
 <code>npm i leapfrog</code>&nbsp;&nbsp;|&nbsp;&nbsp;Works with Claude Code, Cursor, Windsurf
