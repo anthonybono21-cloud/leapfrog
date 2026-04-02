@@ -4,7 +4,7 @@
  *
  * Tests every stealth patch defined in src/stealth.ts:
  * - WebGL vendor/renderer not SwiftShader
- * - navigator.webdriver is undefined
+ * - navigator.webdriver is false (not true)
  * - Client Hints brands clean
  * - outerWidth/outerHeight not zero
  * - navigator.connection exists with realistic values
@@ -100,18 +100,18 @@ describe("Stealth Enhanced — Real Page Evaluation", () => {
   // ── In-page stealth evaluation tests ──────────────────────────────
 
   describe("navigator.webdriver", () => {
-    it("is undefined (not true, not false)", async () => {
+    it("is false (not true)", async () => {
       const session = await manager.createSession();
       const page = tabManager.getActivePage(session);
       await page.goto("about:blank");
 
       const value = await page.evaluate(() => navigator.webdriver);
-      expect(value).toBeUndefined();
+      expect(value).toBe(false);
 
       await manager.destroySession(session.id);
     });
 
-    it("typeof returns 'undefined'", async () => {
+    it("typeof returns 'boolean'", async () => {
       const session = await manager.createSession();
       const page = tabManager.getActivePage(session);
       await page.goto("about:blank");
@@ -119,7 +119,7 @@ describe("Stealth Enhanced — Real Page Evaluation", () => {
       const typeofValue = await page.evaluate(
         () => typeof navigator.webdriver
       );
-      expect(typeofValue).toBe("undefined");
+      expect(typeofValue).toBe("boolean");
 
       await manager.destroySession(session.id);
     });

@@ -223,11 +223,12 @@ describe("QA Bug Regression Tests", () => {
     });
   });
 
-  // ─── BUG-004: navigator.webdriver should be undefined ──────────────
-  // Standard bot detection signal. The stealth init script patches this.
+  // ─── BUG-004: navigator.webdriver should be false (not true) ───────
+  // Standard bot detection signal. The stealth init script patches this
+  // with defineProperty get: () => false after deleting the prototype prop.
 
   describe("BUG-004: navigator.webdriver", () => {
-    it("navigator.webdriver should be undefined after stealth init script", async () => {
+    it("navigator.webdriver should be false after stealth init script", async () => {
       const session = await manager.createSession();
       const page = tabManager.getActivePage(session);
 
@@ -237,12 +238,12 @@ describe("QA Bug Regression Tests", () => {
         return navigator.webdriver;
       });
 
-      expect(webdriverValue).toBeUndefined();
+      expect(webdriverValue).toBe(false);
 
       await manager.destroySession(session.id);
     });
 
-    it("navigator.webdriver should remain undefined after navigation", async () => {
+    it("navigator.webdriver should remain false after navigation", async () => {
       const session = await manager.createSession();
       const page = tabManager.getActivePage(session);
 
@@ -255,24 +256,26 @@ describe("QA Bug Regression Tests", () => {
         return navigator.webdriver;
       });
 
-      expect(webdriverValue).toBeUndefined();
+      expect(webdriverValue).toBe(false);
 
       await manager.destroySession(session.id);
     });
   });
 
   // ─── BUG-005: Custom UA should not disable other stealth options ───
-  // Root cause: stealth.ts getContextOptions() returns {} when customUserAgent
-  // is provided, which disables locale, timezone, and extraHTTPHeaders.
+  // Fixed: stealth.ts getContextOptions() now returns locale/timezone/headers
+  // even when a custom userAgent is provided.
 
   describe("BUG-005: Custom UA + stealth coexistence", () => {
-    it("getContextOptions returns empty when custom UA is provided (documenting current bug)", () => {
+    it("getContextOptions returns stealth config (minus userAgent) when custom UA is provided", () => {
       const stealthInstance = new StealthMode();
       const opts = stealthInstance.getContextOptions("MyCustomUA/1.0");
 
-      // Current behavior: returns {} when custom UA is set.
-      // This is the bug — custom UA disables ALL stealth context options.
-      expect(opts).toEqual({});
+      // Fixed behavior: returns locale/timezone/headers, just omits userAgent
+      expect(opts).toHaveProperty("locale", "en-US");
+      expect(opts).toHaveProperty("timezoneId", "America/New_York");
+      expect(opts).toHaveProperty("extraHTTPHeaders");
+      expect(opts).not.toHaveProperty("userAgent");
     });
 
     it("getContextOptions returns full stealth config when no custom UA", () => {
@@ -295,9 +298,9 @@ describe("QA Bug Regression Tests", () => {
 
       await page.goto("about:blank");
 
-      // navigator.webdriver should still be patched
+      // navigator.webdriver should still be patched (false, not true)
       const webdriver = await page.evaluate(() => navigator.webdriver);
-      expect(webdriver).toBeUndefined();
+      expect(webdriver).toBe(false);
 
       // Plugins should still be faked
       const pluginCount = await page.evaluate(() => navigator.plugins.length);
@@ -321,13 +324,13 @@ describe("QA Bug Regression Tests", () => {
       expect(manager.getSession(id)).toBeUndefined();
     });
 
-    it("second destroy on same ID does not throw (current behavior)", async () => {
+    it("second destroy on same ID throws (session not found)", async () => {
       const session = await manager.createSession();
       const id = session.id;
 
       await manager.destroySession(id);
-      // Second destroy should not throw (it's idempotent)
-      await expect(manager.destroySession(id)).resolves.toBeUndefined();
+      // Second destroy should throw since session no longer exists
+      await expect(manager.destroySession(id)).rejects.toThrow(/not found/);
     });
 
     it("getSession returns undefined after destroy", async () => {
