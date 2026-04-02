@@ -1,7 +1,7 @@
 {
   "name": "leapfrog",
   "version": "0.3.0",
-  "description": "Multi-session browser MCP for AI agents — 19 tools, up to 10x fewer tokens than Playwright, stealth mode",
+  "description": "Multi-session browser MCP for AI agents — 21 tools, up to 10x fewer tokens than Playwright, stealth mode",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/types.d.ts",
@@ -26,14 +26,19 @@
   "keywords": [
     "mcp",
     "browser",
-    "playwright",
-    "ai",
-    "agent",
-    "automation",
     "headless",
+    "playwright",
+    "ai-agent",
+    "automation",
+    "web-scraping",
     "multi-session",
+    "stealth",
+    "dom-snapshot",
+    "model-context-protocol",
     "claude",
-    "cursor"
+    "cursor",
+    "windsurf",
+    "browser-automation"
   ],
   "license": "MIT",
   "repository": {
@@ -55,6 +60,6 @@
     "vitest": "^4.1.2"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   }
 }

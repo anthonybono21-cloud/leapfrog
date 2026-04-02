@@ -1279,7 +1279,7 @@ async function runDoctor(): Promise<void> {
   // Env var summary
   console.log("\nEnvironment:\n");
   console.log(`  LEAP_MAX_SESSIONS   = ${process.env.LEAP_MAX_SESSIONS ?? "(default: 15)"}`);
-  console.log(`  LEAP_IDLE_TIMEOUT   = ${process.env.LEAP_IDLE_TIMEOUT ?? "(default: 300000)"}`);
+  console.log(`  LEAP_IDLE_TIMEOUT   = ${process.env.LEAP_IDLE_TIMEOUT ?? "(default: 1800000)"}`);
   console.log(`  LEAP_HEADLESS       = ${process.env.LEAP_HEADLESS ?? "(default: true)"}`);
   console.log(`  LEAP_CHANNEL        = ${process.env.LEAP_CHANNEL ?? "(default: bundled chromium)"}`);
   console.log(`  LEAP_ALLOW_JS       = ${process.env.LEAP_ALLOW_JS ?? "(default: true)"}`);

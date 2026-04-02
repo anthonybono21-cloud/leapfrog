@@ -31,7 +31,6 @@ if (!Number.isFinite(IDLE_TIMEOUT_MS) || IDLE_TIMEOUT_MS < 0)
     throw new Error("Invalid LEAP_IDLE_TIMEOUT");
 const HEADLESS = process.env.LEAP_HEADLESS !== "false";
 const CHANNEL = process.env.LEAP_CHANNEL || undefined; // "chrome" to use installed Chrome
-const SCREENSHOT_DIR = path.join(os.homedir(), "Documents", "leapfrog-screenshots");
 const MAX_SNAPSHOT_CHARS = 10000;
 const ALLOW_JS = process.env.LEAP_ALLOW_JS !== "false";
 const sessions = new SessionManager({
@@ -148,8 +147,17 @@ server.registerTool("session_create", {
             .boolean()
             .optional()
             .describe("Enable/disable stealth mode for this session. Default: true (uses global setting)."),
+        proxy: z
+            .object({
+            server: z.string().describe("Proxy server URL (e.g. 'http://proxy:8080', 'socks5://proxy:1080')."),
+            username: z.string().optional().describe("Proxy auth username."),
+            password: z.string().optional().describe("Proxy auth password."),
+            bypass: z.string().optional().describe("Comma-separated domains to bypass proxy (e.g. 'localhost,.example.com')."),
+        })
+            .optional()
+            .describe("Per-session proxy configuration. Each session can use a different proxy."),
     }),
-}, async ({ profilePath, viewport, userAgent, locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth }) => {
+}, async ({ profilePath, viewport, userAgent, locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth, proxy }) => {
     try {
         // Validate profilePath stays within the profiles directory
         if (profilePath) {
@@ -166,7 +174,7 @@ server.registerTool("session_create", {
         }
         const session = await sessions.createSession({
             profilePath, viewport, userAgent,
-            locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth,
+            locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth, proxy,
         });
         const stats = sessions.getStats();
         return ok(`Session created: ${session.id}\n` +
@@ -569,31 +577,32 @@ server.registerTool("act", {
 // ─── screenshot ─────────────────────────────────────────────────────────────
 server.registerTool("screenshot", {
     title: "Screenshot",
-    description: "Capture a screenshot of the current page. Returns the image inline.",
+    description: "Capture a screenshot of the current page. Returns the image inline as base64. Optionally save to disk with savePath.",
     inputSchema: z.object({
         sessionId: z.string().describe("Session ID."),
         fullPage: z.boolean().default(false).describe("Capture full scrollable page."),
         selector: z.string().optional().describe("CSS selector to capture a specific element."),
+        savePath: z.string().optional().describe("Optional file path to save the screenshot to disk. If omitted, image is returned inline only."),
     }),
-}, async ({ sessionId, fullPage, selector }) => {
+}, async ({ sessionId, fullPage, selector, savePath }) => {
     try {
         const session = requireSession(sessionId);
         const page = getPage(session);
-        await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
-        const filepath = path.join(SCREENSHOT_DIR, `${sessionId}_${Date.now()}.png`);
+        let imageBuffer;
         if (selector) {
-            await page.locator(selector).screenshot({ path: filepath });
+            imageBuffer = await page.locator(selector).screenshot();
         }
         else {
-            await page.screenshot({ path: filepath, fullPage });
+            imageBuffer = await page.screenshot({ fullPage });
         }
-        const imageBuffer = await fs.readFile(filepath);
-        return {
-            content: [
-                { type: "text", text: `Saved: ${filepath}` },
-                { type: "image", data: imageBuffer.toString("base64"), mimeType: "image/png" },
-            ],
-        };
+        const content = [];
+        if (savePath) {
+            await fs.mkdir(path.dirname(savePath), { recursive: true });
+            await fs.writeFile(savePath, imageBuffer);
+            content.push({ type: "text", text: `Saved: ${savePath}` });
+        }
+        content.push({ type: "image", data: imageBuffer.toString("base64"), mimeType: "image/png" });
+        return { content };
     }
     catch (e) {
         return err(`Screenshot failed: ${e.message}`);
@@ -1139,15 +1148,6 @@ async function runDoctor() {
     catch {
         checks.push({ label: "Profiles directory", status: "warn", detail: `Not writable: ${PROFILE_DIR}` });
     }
-    // Screenshots directory
-    try {
-        await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
-        await fs.access(SCREENSHOT_DIR, (await import("fs")).constants.W_OK);
-        checks.push({ label: "Screenshots directory", status: "pass", detail: SCREENSHOT_DIR });
-    }
-    catch {
-        checks.push({ label: "Screenshots directory", status: "warn", detail: `Not writable: ${SCREENSHOT_DIR}` });
-    }
     // Print results
     console.log("\nLeapfrog Doctor\n");
     for (const c of checks) {
@@ -1158,7 +1158,7 @@ async function runDoctor() {
     // Env var summary
     console.log("\nEnvironment:\n");
     console.log(`  LEAP_MAX_SESSIONS   = ${process.env.LEAP_MAX_SESSIONS ?? "(default: 15)"}`);
-    console.log(`  LEAP_IDLE_TIMEOUT   = ${process.env.LEAP_IDLE_TIMEOUT ?? "(default: 300000)"}`);
+    console.log(`  LEAP_IDLE_TIMEOUT   = ${process.env.LEAP_IDLE_TIMEOUT ?? "(default: 1800000)"}`);
     console.log(`  LEAP_HEADLESS       = ${process.env.LEAP_HEADLESS ?? "(default: true)"}`);
     console.log(`  LEAP_CHANNEL        = ${process.env.LEAP_CHANNEL ?? "(default: bundled chromium)"}`);
     console.log(`  LEAP_ALLOW_JS       = ${process.env.LEAP_ALLOW_JS ?? "(default: true)"}`);
@@ -1168,6 +1168,29 @@ async function runDoctor() {
     console.log();
     const failed = checks.some((c) => c.status === "fail");
     process.exit(failed ? 1 : 0);
+}
+function printHelp() {
+    console.log(`Leapfrog — Multi-session browser MCP for AI agents
+
+Usage: npx leapfrog [options]
+
+Options:
+  --doctor    Run diagnostics and verify installation
+  --config    Print MCP configuration JSON
+  --help, -h  Show this help message
+
+Environment Variables:
+  LEAP_MAX_SESSIONS    Max concurrent sessions (default: 15)
+  LEAP_HEADLESS        Run headless (default: true)
+  LEAP_STEALTH         Enable stealth mode (default: true)
+  LEAP_HUMANIZE        Enable humanization (default: false)
+  LEAP_IDLE_TIMEOUT    Session idle timeout in ms (default: 1800000)
+  LEAP_LOG_LEVEL       Log level: debug|info|warn|error (default: info)
+  LEAP_CHANNEL         Browser channel: chromium|chrome (default: chromium)
+  LEAP_ALLOW_JS        Allow JS evaluation (default: true)
+
+Documentation: https://github.com/anthonybono21-cloud/leapfrog`);
+    process.exit(0);
 }
 function printConfig() {
     const config = {
@@ -1193,6 +1216,10 @@ async function main() {
     const args = process.argv.slice(2);
     if (args.includes("--version") || args.includes("-v")) {
         printVersion();
+        return;
+    }
+    if (args.includes("--help") || args.includes("-h")) {
+        printHelp();
         return;
     }
     if (args.includes("--config")) {
