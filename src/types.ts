@@ -96,6 +96,7 @@ export interface SessionManagerConfig {
   cleanupIntervalMs: number;
   defaultViewport: { width: number; height: number };
   headless: boolean;
+  channel?: string;
 }
 
 // ─── Snapshot Engine ────────────────────────────────────────────────────────

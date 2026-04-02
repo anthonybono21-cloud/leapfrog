@@ -85,8 +85,8 @@ const C = {
 When `npx leapfrog` starts the MCP server, print this to `stderr`:
 
 ```
-  @..@    Leapfrog v0.1.0
- (----)   18 tools | 15 max sessions | stealth on
+  @..@    Leapfrog v0.2.0
+ (----)   19 tools | 15 max sessions | stealth on
 ( >__< )  Ready.
 ```
 
@@ -176,8 +176,8 @@ function printBanner(version: string, tools: number, maxSessions: number, stealt
 
 ### The naming philosophy
 
-Frog metaphors add personality but must never add confusion. The rule:
-**If a term appears in CLI output or tool responses, it must be instantly clear to someone who has never read the docs.** Marketing copy and README prose get more freedom.
+Frog metaphors earn attention. They don't replace clarity. The rule:
+**If a term appears in CLI output or tool responses, it must be instantly clear to someone who has never read the docs.** Marketing and README prose get more latitude — but only when the metaphor makes the concept *stickier*, not just cuter.
 
 ### Full vocabulary
 
@@ -186,9 +186,9 @@ Frog metaphors add personality but must never add confusion. The rule:
 | Browser session       | Pond           | Marketing, README prose, blog posts           |
 | Tab                   | Lily pad       | Marketing, README prose only                  |
 | Navigate to URL       | Leap           | Marketing, tagline                            |
-| DOM snapshot          | Snapshot       | Everywhere (already literal, no rename)       |
+| DOM snapshot          | Surface        | Marketing ("read the surface"), `snapshot` stays literal in CLI |
 | Network intelligence  | Ripple          | Marketing ("see every ripple")               |
-| Console errors        | Croak          | Marketing, maybe log output as easter egg     |
+| Console errors        | Croak          | Marketing ("catch every croak"), easter egg potential in logs |
 | Stealth mode          | Camouflage     | Marketing, README                             |
 | Screenshot            | Screenshot     | Everywhere (already literal, no rename)       |
 | Session pool          | Pool / Pond    | Marketing ("a pool of ponds")                 |
@@ -204,11 +204,11 @@ Snapshot: 847 tokens            <-- "Snapshot" is already the right word
 
 ### What appears in marketing / README only
 
-> "Each session is a **pond** -- an isolated browser with its own cookies, storage,
+> "Each session is a **pond** — an isolated browser with its own cookies, storage,
 > and fingerprint. Leapfrog manages up to 15 ponds simultaneously, each one
 > invisible thanks to built-in **camouflage**."
 
-> "**Leap** between pages. See every **ripple** on the network.
+> "**Leap** between pages. Read the **surface**. See every **ripple** on the network.
 > Catch every **croak** in the console."
 
 ### The line
@@ -218,9 +218,9 @@ Snapshot: 847 tokens            <-- "Snapshot" is already the right word
 
 ### Tagline candidates
 
-- "Leap between pages. Land on data."
-- "Multi-session browsing for AI agents."  *(straight, for npm/GitHub)*
-- "Every agent deserves a pond."
+- **"Your agent's context window isn't getting bigger. Your browser should get smaller."** *(positioning)*
+- "Multi-session browsing for AI agents." *(straight, for npm/GitHub)*
+- "15 browsers. Up to 10x lighter. Zero cloud." *(spec line)*
 
 
 ---
@@ -230,7 +230,7 @@ Snapshot: 847 tokens            <-- "Snapshot" is already the right word
 ### `description` field (94 chars)
 
 ```
-"Multi-session headless browser MCP -- 18 tools, stealth mode, compact snapshots"
+"Multi-session browser MCP for AI agents -- 19 tools, up to 10x fewer tokens than Playwright, stealth mode"
 ```
 
 ### `keywords` array

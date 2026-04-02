@@ -56,11 +56,14 @@ export class SessionManager implements ISessionManager {
     }
 
     const launchOpts: Record<string, unknown> = { headless: this.config.headless };
+    if (this.config.channel) {
+      launchOpts.channel = this.config.channel;
+    }
     if (stealth.isEnabled()) {
       launchOpts.args = stealth.getLaunchArgs();
     }
     this.browser = await chromium.launch(launchOpts);
-    logger.info("browser.launched", { headless: this.config.headless, stealth: stealth.isEnabled() });
+    logger.info("browser.launched", { headless: this.config.headless, channel: this.config.channel ?? "bundled", stealth: stealth.isEnabled() });
 
     // Attach crash recovery — auto-clears sessions on unexpected disconnect
     crashRecovery.attachToBrowser(this.browser, () => {

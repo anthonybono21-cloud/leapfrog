@@ -15,7 +15,7 @@ Built HydraChrome from v0.1 (11 tools) to Leapfrog v0.2 (19 tools), renamed ever
 ```
 57e5f3c Brand package: ASCII frogs, color palette, naming guide
 455b12b Launch doc: why/compare/how/numbers/start
-0999b84 Rename to Leapfrog — hydrachrome → leapfrog across entire codebase
+0999b84 Rename to Leapfrog — leapfrog → leapfrog across entire codebase
 ef5517a Launch prep: README, LICENSE, CLI flags, stress tests, council verdict
 aa46c67 Upgrade Playwright to 1.59.0 — CVE patched, ariaSnapshot now typed
 99061fc Add comprehensive roadmap from 5-agent brainstorm
@@ -47,15 +47,15 @@ Kill Sprints 4-7. Ship what exists. Let users write the next roadmap. See `counc
 ### Don Draper's Required Fixes (do these first)
 
 **1. Number consistency — pick canonical numbers and use everywhere:**
-- Playwright MCP: "~15,000 tokens typical" (not 3,800-50K range in headlines)
-- Leapfrog: "~1,200 tokens"
-- Savings: "12x" (not 10x — 12x is the real number and more impressive)
+- Playwright MCP: "~14,000 tokens" for content-heavy pages (Hacker News benchmark)
+- Leapfrog: "~1,400 tokens" for the same page
+- Savings: "up to 10x" (benchmark-corrected — median is ~4-5x, best case 10.3x on content-heavy pages)
 - Tool count: 19 (verify and fix the "18" in BRAND.md)
-- Range qualifier (use once in LAUNCH.md): "4-55x savings, median 5-8x"
+- Range qualifier (use in LAUNCH.md): "2-10x savings, median ~4-5x across 8 page types"
 
 **2. README.md fixes:**
 - Replace README frog ASCII with BRAND.md's `@..@` design (large version)
-- Change "10x fewer tokens" → "12x fewer tokens"
+- DONE: "12x fewer tokens" → "up to 10x fewer tokens" with range context
 - Change "Splash" → "Surface" in ecosystem table ("what you see on the surface of the pond")
 
 **3. LAUNCH.md fixes:**
@@ -113,15 +113,15 @@ Kill Sprints 4-7. Ship what exists. Let users write the next roadmap. See `counc
 
 | What | Where |
 |------|-------|
-| Source | `~/Projects/hydrachrome/src/` (9 files) |
-| Tests | `~/Projects/hydrachrome/src/__tests__/` (5 files, 74 tests) |
-| README | `~/Projects/hydrachrome/README.md` |
-| Brand guide | `~/Projects/hydrachrome/BRAND.md` |
-| Launch doc | `~/Projects/hydrachrome/LAUNCH.md` |
-| Roadmap | `~/Projects/hydrachrome/ROADMAP.md` |
-| Council verdict | `~/Projects/hydrachrome/council-20260401-roadmap-review.md` |
+| Source | `~/Projects/leapfrog/src/` (9 files) |
+| Tests | `~/Projects/leapfrog/src/__tests__/` (5 files, 74 tests) |
+| README | `~/Projects/leapfrog/README.md` |
+| Brand guide | `~/Projects/leapfrog/BRAND.md` |
+| Launch doc | `~/Projects/leapfrog/LAUNCH.md` |
+| Roadmap | `~/Projects/leapfrog/ROADMAP.md` |
+| Council verdict | `~/Projects/leapfrog/council-20260401-roadmap-review.md` |
 | MCP config | `~/.mcp.json` → needs rename to `"leapfrog"` + LEAP_ env vars |
-| Memory | `~/.claude/projects/-Users-ted/memory/project_hydrachrome.md` |
+| Memory | `~/.claude/projects/-Users-ted/memory/project_leapfrog.md` |
 
 ## Env Vars (New Prefix)
 - `LEAP_MAX_SESSIONS` (default 15)

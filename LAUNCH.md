@@ -10,20 +10,22 @@ It gets worse. One browser instance means your agents fight over tabs. Need to l
 
 I got tired of watching Playwright eat my context window. So I built Leapfrog.
 
-**Token efficiency**: ~1,200 tokens per page instead of 15,000. Same page, same information, 90% less noise.
+**Token efficiency**: 3-10x fewer tokens than Playwright MCP, depending on page complexity. Content-heavy pages (news, wikis) save up to 10x. Dense forms still save 2-3x. Median across real-world sites: ~4-5x.
 **Parallel sessions**: 15 isolated browser sessions running simultaneously, each with its own cookies and state.
 **Network intelligence**: See every HTTP request, response body, and timing. Mock APIs. Block ads. No other browser MCP does this.
 **Stealth mode**: Patches navigator.webdriver, fakes Chrome plugins, randomizes canvas fingerprints. Sites think you're a real user.
 **Multi-tab**: Popups, OAuth flows, and `target="_blank"` links are auto-tracked and switchable.
 **Crash recovery**: Browser disconnects are caught and reported. Sessions are cleared cleanly, not left dangling.
 
-One npm install. 19 tools. The frog does the rest.
+One npm install. 19 tools. Zero cloud dependencies.
 
 ---
 
 ## Leapfrog vs. Everything Else
 
-Before building this, I spent weeks testing every browser automation tool that claims to work with AI agents. Here's what I found.
+Before building this, I spent weeks testing every browser automation tool that claims to work with AI agents. Here's the honest assessment before you look at the table: agent-browser wins on raw token count (~200-400 tokens) because it returns extremely minimal snapshots. browser-use has 81K GitHub stars and the best benchmark scores (89.1% WebVoyager). Stagehand has the slickest developer experience with natural language actions. Computer Use sees the actual screen, which handles edge cases nothing else can.
+
+Where Leapfrog pulls ahead: the combination of compact snapshots + parallel isolated sessions + network intelligence + stealth, running locally with zero cloud dependencies. Nobody else ships all of that in one package.
 
 | | **Leapfrog** | **Playwright MCP** | **agent-browser** | **Stagehand** | **browser-use** | **Computer Use** |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -45,10 +47,6 @@ Before building this, I spent weeks testing every browser automation tool that c
 | **Install complexity** | `npx leapfrog` | `npx @playwright/mcp` | `npm i -g agent-browser` | npm + Browserbase API key | `pip install browser-use` + API key | API access required |
 | **Price** | Free | Free | Free | Free tier, then paid cloud | Free (+ LLM costs) | API token costs |
 
-**The honest take**: agent-browser wins on raw token count (~200-400 tokens) because it returns extremely minimal snapshots. browser-use has 81K GitHub stars and the best benchmark scores (89.1% WebVoyager). Stagehand has the slickest developer experience with natural language actions. Computer Use sees the actual screen, which handles edge cases nothing else can.
-
-Where Leapfrog pulls ahead: the combination of compact snapshots + parallel isolated sessions + network intelligence + stealth, running locally with zero cloud dependencies. Nobody else ships all of that in one package.
-
 ---
 
 ## How It Works
@@ -61,7 +59,7 @@ That YAML output gets parsed into a tree of nodes, then filtered. Interactive el
 
 Each surviving node gets a compact `@eN` reference (e.g., `@e1`, `@e2`) that maps back to a Playwright locator internally. Your agent sees `@e3 button "Submit"` and passes `@e3` to the `act` tool. No CSS selectors, no XPaths, no guessing. The ref map resets on each snapshot but the counter increments across the session for consistency.
 
-The result: Hacker News renders in ~1,400 tokens. A GitHub repo page in ~1,255. A BBC News homepage in ~2,500 (capped). Scoped snapshots (pass a CSS selector to snapshot just a form or a sidebar) deliver 94-98% savings on top of that.
+The result: Hacker News renders in ~1,400 tokens (vs ~14,000 in Playwright — 10.3x savings). A GitHub repo page in ~1,255. Wikipedia-scale pages save ~5.6x. Even worst-case dense forms still deliver ~1.6x compression. Scoped snapshots (pass a CSS selector to snapshot just a form or a sidebar) deliver 94-98% savings on top of that.
 
 ### Session Architecture
 
@@ -101,7 +99,7 @@ SSRF protection resolves hostnames via DNS before navigation and blocks internal
 - **15 sessions, 50+ tabs each** -- 52MB peak heap under stress
 - **~19MB RSS per session** in steady state
 - **0.3ms tab switch** speed
-- **4-55x token savings** vs Playwright MCP (median 5-8x, verified across 7 sites)
+- **2-10x token savings** vs Playwright MCP (median ~4-5x, verified across 8 page types: HN 10.3x, Wikipedia 5.6x, GitHub 5.2x, navigation 4.7x, dashboard 3.7x, simple 3.6x, form 2.6x, dense form 1.6x)
 - **Scoped snapshot**: Wikipedia table of contents = 196 tokens (98.4% savings vs full page)
 - **Action responses**: 10-40 tokens for click/fill/press (vs full re-snapshot in other tools)
 - **3 dependencies**: Playwright, MCP SDK, Zod. That's it.

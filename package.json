@@ -1,14 +1,17 @@
 {
   "name": "leapfrog",
-  "version": "0.1.0",
-  "description": "Multi-session browser MCP server with compact snapshots",
+  "version": "0.2.0",
+  "description": "Multi-session browser MCP for AI agents — 19 tools, up to 10x fewer tokens than Playwright, stealth mode",
   "type": "module",
   "main": "dist/index.js",
+  "types": "dist/types.d.ts",
   "bin": {
     "leapfrog": "dist/index.js"
   },
   "files": [
-    "dist",
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "!dist/__tests__",
     "README.md",
     "LICENSE"
   ],
@@ -17,6 +20,7 @@
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "test": "vitest run",
+    "prepublishOnly": "npm run build && npm test",
     "postinstall": "npx playwright install chromium"
   },
   "keywords": [
@@ -34,9 +38,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/anthropics/leapfrog"
+    "url": "https://github.com/anthonybono21-cloud/leapfrog"
   },
-  "homepage": "https://github.com/anthropics/leapfrog#readme",
+  "homepage": "https://github.com/anthonybono21-cloud/leapfrog#readme",
+  "bugs": {
+    "url": "https://github.com/anthonybono21-cloud/leapfrog/issues"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.11.0",
     "playwright": "^1.59.0",

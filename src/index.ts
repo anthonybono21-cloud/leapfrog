@@ -13,6 +13,10 @@ import { networkIntelligence } from "./network-intelligence.js";
 import { tabManager } from "./tab-manager.js";
 import { crashRecovery } from "./crash-recovery.js";
 import { logger } from "./logger.js";
+import { createRequire } from "module";
+
+const require = createRequire(import.meta.url);
+const pkg = require("../package.json") as { version: string };
 import type { Session } from "./types.js";
 
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -22,6 +26,7 @@ const IDLE_TIMEOUT_MS = Number(process.env.LEAP_IDLE_TIMEOUT ?? 5 * 60 * 1000);
 if (!Number.isFinite(MAX_SESSIONS) || MAX_SESSIONS < 1) throw new Error("Invalid LEAP_MAX_SESSIONS");
 if (!Number.isFinite(IDLE_TIMEOUT_MS) || IDLE_TIMEOUT_MS < 1000) throw new Error("Invalid LEAP_IDLE_TIMEOUT");
 const HEADLESS = process.env.LEAP_HEADLESS !== "false";
+const CHANNEL = process.env.LEAP_CHANNEL || undefined; // "chrome" to use installed Chrome
 const SCREENSHOT_DIR = path.join(os.homedir(), "Documents", "leapfrog-screenshots");
 const MAX_SNAPSHOT_CHARS = 10000;
 const ALLOW_JS = process.env.LEAP_ALLOW_JS !== "false";
@@ -30,6 +35,7 @@ const sessions = new SessionManager({
   maxSessions: MAX_SESSIONS,
   idleTimeoutMs: IDLE_TIMEOUT_MS,
   headless: HEADLESS,
+  channel: CHANNEL,
 });
 
 const snapEngine = new SnapshotEngine();
@@ -106,7 +112,7 @@ async function checkSSRF(hostname: string): Promise<string | null> {
 // ─── Server ─────────────────────────────────────────────────────────────────
 
 const server = new McpServer(
-  { name: "leapfrog", version: "0.1.0" },
+  { name: "leapfrog", version: pkg.version },
   { capabilities: { tools: {} } },
 );
 
@@ -971,6 +977,7 @@ async function runDoctor(): Promise<void> {
   console.log(`  LEAP_MAX_SESSIONS   = ${process.env.LEAP_MAX_SESSIONS ?? "(default: 15)"}`);
   console.log(`  LEAP_IDLE_TIMEOUT   = ${process.env.LEAP_IDLE_TIMEOUT ?? "(default: 300000)"}`);
   console.log(`  LEAP_HEADLESS       = ${process.env.LEAP_HEADLESS ?? "(default: true)"}`);
+  console.log(`  LEAP_CHANNEL        = ${process.env.LEAP_CHANNEL ?? "(default: bundled chromium)"}`);
   console.log(`  LEAP_ALLOW_JS       = ${process.env.LEAP_ALLOW_JS ?? "(default: true)"}`);
   console.log(`  LEAP_STEALTH        = ${process.env.LEAP_STEALTH ?? "(default: true)"}`);
   console.log(`  LEAP_LOG_LEVEL      = ${process.env.LEAP_LOG_LEVEL ?? "(default: info)"}`);
@@ -997,7 +1004,7 @@ function printConfig(): void {
 }
 
 function printVersion(): void {
-  console.log("0.1.0");
+  console.log(pkg.version);
   process.exit(0);
 }
 

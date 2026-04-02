@@ -1,17 +1,21 @@
 <p align="center">
 <pre align="center">
-       ╱▔▔▔╲
-      ▕ ●  ● ▏
-      ╰╲ ▽▽ ╱╯
-    ╱▔▔▔▔╲╱▔▔▔▔╲
-   ▕ ░░░░░░░░░░░ ▏
-    ╲▁▁▁╱  ╲▁▁▁╱
-     ╱╱      ╲╲
+        @..@
+       (----)
+      / >  < \
+     |        |
+     | \    / |
+     \  '--'  /
+      '.    .'
+     /| `--` |\
+    / |        | \
+   '  '.____.'  '
+        |  |
 </pre>
 </p>
 
 <h1 align="center">Leapfrog</h1>
-<p align="center"><strong>Multi-session browser MCP for AI agents.</strong><br/>19 tools. 15 parallel sessions. 10x fewer tokens.</p>
+<p align="center"><strong>Multi-session browser MCP for AI agents.</strong><br/>19 tools. 15 parallel sessions. Up to 10x fewer tokens.</p>
 
 <p align="center">
 <code>npm i leapfrog</code>&nbsp;&nbsp;|&nbsp;&nbsp;Works with Claude Code, Cursor, Windsurf
@@ -21,20 +25,22 @@
 
 ## The Problem
 
-Playwright MCP sends **~15,000 tokens per page** to your agent. Most of that is noise. Your context window fills up. Your agent gets confused. You pay for it.
+Playwright MCP sends **~14,000 tokens** for a content-heavy page like Hacker News. Most of that is noise. Your context window fills up. Your agent gets confused. You pay for it.
 
-Leapfrog sends **~1,200 tokens**. Same page. Same information. Just the parts that matter.
+Leapfrog sends **~1,400 tokens**. Same page. Same information. Up to 10x less noise.
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │  Playwright MCP                                     │
-│  ████████████████████████████████████████  ~15,000   │
+│  ████████████████████████████████████████  ~14,000   │
 │                                                     │
 │  Leapfrog                                           │
-│  ████                                     ~1,200    │
+│  █████                                    ~1,400    │
 └─────────────────────────────────────────────────────┘
-                    per page snapshot
+          tokens per page (Hacker News, real test)
 ```
+
+Savings range from 2-10x depending on page complexity. Content-heavy pages see the biggest wins. Dense forms see the smallest. The median across real-world sites is **~4-5x**.
 
 ## Quick Start
 
@@ -63,7 +69,7 @@ Chromium installs automatically. If it fails: `npx playwright install chromium`
 
 | | Leapfrog | Playwright MCP | agent-browser |
 |---|:---:|:---:|:---:|
-| Tokens per page | **~1,200** | ~15,000 | ~300 |
+| Tokens per page | **~1,200-2,500** | ~3,800-15,000 | ~300 |
 | Parallel sessions | **15** | 1 | 1 |
 | Session isolation | Yes | No | No |
 | Multi-tab / popups | Yes | No | No |
@@ -77,15 +83,15 @@ Chromium installs automatically. If it fails: `npx playwright install chromium`
 
 ## The Ecosystem
 
-Leapfrog speaks in pond metaphors. Your agent is the frog.
+Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 
 | Concept | Leapfrog term | What it means |
 |---|---|---|
-| Sessions | **Ponds** | Isolated browser contexts (cookies, storage, state) |
-| Tabs | **Pads** | Lily pads -- where the frog lands within a pond |
+| Sessions | **Ponds** | Isolated browser contexts — cookies, storage, state |
+| Tabs | **Lily pads** | Where the frog lands within a pond |
 | Navigate | **Leap** | Jump to a URL, get a compact snapshot back |
-| Snapshots | **Splash** | What you see when you land -- interactive `@eN` refs |
-| Network traffic | **Ripple** | HTTP requests under the surface |
+| Snapshots | **Surface** | What you see on the surface — interactive `@eN` refs |
+| Network traffic | **Ripple** | HTTP requests flowing under the surface |
 | Console errors | **Croak** | Something went wrong in the browser |
 | Stealth mode | **Camouflage** | Anti-bot evasion patches |
 
@@ -95,7 +101,7 @@ Leapfrog speaks in pond metaphors. Your agent is the frog.
 
 | Tool | What it does |
 |---|---|
-| `session_create` | Open a new pond -- isolated cookies, state, viewport |
+| `session_create` | Open a new pond — isolated cookies, state, viewport |
 | `session_destroy` | Drain a pond and free the slot |
 | `session_list` | See all active ponds with URLs and idle times |
 | `session_save_profile` | Save auth state to disk for future ponds |
@@ -103,18 +109,18 @@ Leapfrog speaks in pond metaphors. Your agent is the frog.
 | `pool_status` | Pool stats, memory, uptime |
 | `session_health` | Is the pond healthy? Browser connected, page responsive? |
 
-### Leaping & Splashing (6)
+### Navigation & Snapshots (6)
 
 | Tool | What it does |
 |---|---|
 | `navigate` | Leap to a URL, return a compact `@eN` snapshot |
-| `snapshot` | Re-splash the current page (scope with CSS selector) |
+| `snapshot` | Re-read the surface (scope with CSS selector) |
 | `act` | Click, fill, type, check, select, press, scroll, hover, back, forward |
 | `wait_for` | Wait for element / text / network idle / navigation / JS expression |
 | `screenshot` | Capture PNG (full page or element) |
 | `extract` | Pull text, HTML, title, URL, or evaluate JS |
 
-### Pad Management (3)
+### Tab Management (3)
 
 | Tool | What it does |
 |---|---|
@@ -122,23 +128,23 @@ Leapfrog speaks in pond metaphors. Your agent is the frog.
 | `tab_switch` | Hop to another pad (-1 for most recent popup) |
 | `tab_close` | Close a pad (can't close the last one) |
 
-### Ripple Intelligence (3)
+### Network Intelligence (3)
 
 | Tool | What it does |
 |---|---|
-| `network_log` | See HTTP traffic -- filter by URL, method, status, content-type |
-| `console_log` | Read croaks -- browser console filtered by level |
+| `network_log` | See HTTP traffic — filter by URL, method, status, content-type |
+| `console_log` | Read browser console output, filtered by level |
 | `network_intercept` | Block, mock, or log requests by URL pattern |
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `LEAP_MAX_SESSIONS` | `15` | Max concurrent ponds |
-| `LEAP_IDLE_TIMEOUT` | `300000` | Pond idle timeout in ms (5 min) |
+| `LEAP_MAX_SESSIONS` | `15` | Max concurrent sessions |
+| `LEAP_IDLE_TIMEOUT` | `300000` | Session idle timeout in ms (5 min) |
 | `LEAP_HEADLESS` | `true` | Set `false` to watch the browser |
 | `LEAP_ALLOW_JS` | `true` | Allow JS evaluation in `extract` and `wait_for` |
-| `LEAP_STEALTH` | `true` | Camouflage mode (anti-bot evasion) |
+| `LEAP_STEALTH` | `true` | Stealth mode (anti-bot evasion) |
 | `LEAP_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 
 ## Tests

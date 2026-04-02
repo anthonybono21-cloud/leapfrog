@@ -1,3 +1,24 @@
 node_modules/
 .claude/worktrees/
 dist/
+.env
+.DS_Store
+*.tgz
+coverage/
+.vscode/
+.gstack/
+
+# Internal strategy docs (not for public repo)
+internal/
+research/
+
+# Session handoffs and internal planning
+HANDOFF-V030.md
+SESSION-HANDOFF-APR1.md
+GTM-PLAN.md
+DON-COPY-PACKAGE.md
+BRAND-IDENTITY-FULL.md
+SIZZLE-REEL-STORYBOARD.md
+BENCHMARK-RESULTS.md
+PACKAGING-AUDIT.md
+COOKIE-AND-ROADMAP-ANALYSIS.md

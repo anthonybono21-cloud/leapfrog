@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & Discussion
+    url: https://github.com/anthropics/leapfrog/issues
+    about: For questions, open a regular issue. No separate discussions forum yet.
+  - name: Security Vulnerabilities
+    url: https://github.com/anthropics/leapfrog/blob/main/SECURITY.md
+    about: Do NOT open public issues for security vulnerabilities. See SECURITY.md.
