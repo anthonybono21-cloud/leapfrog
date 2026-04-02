@@ -59,6 +59,24 @@ export interface SessionCreateOptions {
     };
     /** Custom user agent */
     userAgent?: string;
+    /** Browser locale (e.g. "en-US", "fr-FR") */
+    locale?: string;
+    /** Timezone ID (e.g. "America/New_York", "Europe/London") */
+    timezoneId?: string;
+    /** Geolocation to emulate */
+    geolocation?: {
+        latitude: number;
+        longitude: number;
+        accuracy?: number;
+    };
+    /** Permissions to grant (e.g. ["geolocation", "notifications"]) */
+    permissions?: string[];
+    /** Preferred color scheme */
+    colorScheme?: "light" | "dark" | "no-preference";
+    /** Whether to accept downloads. Default: true */
+    acceptDownloads?: boolean;
+    /** Enable/disable stealth mode for this session. Default: true (global setting) */
+    stealth?: boolean;
 }
 export interface ISessionManager {
     createSession(opts?: SessionCreateOptions): Promise<Session>;

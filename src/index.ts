@@ -131,9 +131,35 @@ server.registerTool(
         .optional()
         .describe("Custom viewport. Default: 1280x720."),
       userAgent: z.string().optional().describe("Custom user agent string."),
+      locale: z.string().optional().describe("Browser locale (e.g. 'en-US', 'fr-FR')."),
+      timezoneId: z.string().optional().describe("Timezone ID (e.g. 'America/New_York', 'Europe/London')."),
+      geolocation: z
+        .object({
+          latitude: z.number(),
+          longitude: z.number(),
+          accuracy: z.number().optional(),
+        })
+        .optional()
+        .describe("Geolocation to emulate."),
+      permissions: z
+        .array(z.string())
+        .optional()
+        .describe("Permissions to grant (e.g. ['geolocation', 'notifications'])."),
+      colorScheme: z
+        .enum(["light", "dark", "no-preference"])
+        .optional()
+        .describe("Preferred color scheme."),
+      acceptDownloads: z
+        .boolean()
+        .optional()
+        .describe("Whether to accept downloads. Default: true."),
+      stealth: z
+        .boolean()
+        .optional()
+        .describe("Enable/disable stealth mode for this session. Default: true (uses global setting)."),
     }),
   },
-  async ({ profilePath, viewport, userAgent }) => {
+  async ({ profilePath, viewport, userAgent, locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth }) => {
     try {
       // Validate profilePath stays within the profiles directory
       if (profilePath) {
@@ -147,7 +173,10 @@ server.registerTool(
           return err(`Profile not found: ${resolved}`);
         }
       }
-      const session = await sessions.createSession({ profilePath, viewport, userAgent });
+      const session = await sessions.createSession({
+        profilePath, viewport, userAgent,
+        locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth,
+      });
       const stats = sessions.getStats();
       return ok(
         `Session created: ${session.id}\n` +
@@ -352,13 +381,13 @@ server.registerTool(
   {
     title: "Browser Action",
     description:
-      "Perform a browser interaction: click, fill, type, check, select, press key, scroll, hover, back, forward. " +
+      "Perform a browser interaction: click, fill, type, check, select, press key, scroll, hover, mousemove, back, forward. " +
       "Use @eN refs from navigate/snapshot as the target (e.g. '@e2'). CSS selectors also work. " +
       "Returns a fresh snapshot if the page navigated, or just the action result if it didn't.",
     inputSchema: z.object({
       sessionId: z.string().describe("Session ID."),
       action: z
-        .enum(["click", "dblclick", "fill", "type", "check", "uncheck", "select", "press", "scroll", "hover", "back", "forward"])
+        .enum(["click", "dblclick", "fill", "type", "check", "uncheck", "select", "press", "scroll", "hover", "mousemove", "back", "forward"])
         .describe("Interaction to perform."),
       target: z
         .string()
@@ -374,9 +403,15 @@ server.registerTool(
         .optional()
         .describe("Scroll direction. Default: down."),
       scrollAmount: z.number().int().optional().describe("Pixels to scroll. Default: 300."),
+      typeDelay: z
+        .number()
+        .optional()
+        .describe("Delay in ms between keystrokes for action='type'. Enables human-like typing speed."),
+      x: z.number().optional().describe("X coordinate for mousemove action."),
+      y: z.number().optional().describe("Y coordinate for mousemove action."),
     }),
   },
-  async ({ sessionId, action, target, value, key, scrollDirection, scrollAmount }) => {
+  async ({ sessionId, action, target, value, key, scrollDirection, scrollAmount, typeDelay, x, y }) => {
     try {
       const session = requireSession(sessionId);
       const page = getPage(session);
@@ -410,7 +445,9 @@ server.registerTool(
         }
         case "type": {
           if (!target || value === undefined) return err("'type' requires target and value");
-          await resolve(target).pressSequentially(value);
+          const typeOpts: { delay?: number } = {};
+          if (typeDelay !== undefined) typeOpts.delay = typeDelay;
+          await resolve(target).pressSequentially(value, typeOpts);
           break;
         }
         case "check":
@@ -440,6 +477,11 @@ server.registerTool(
             const deltaY = dir === "down" ? px : dir === "up" ? -px : 0;
             await page.mouse.wheel(deltaX, deltaY);
           }
+          break;
+        }
+        case "mousemove": {
+          if (x === undefined || y === undefined) return err("'mousemove' requires x and y coordinates");
+          await page.mouse.move(x, y);
           break;
         }
         case "back":
@@ -891,6 +933,169 @@ server.registerTool(
       return ok(lines.join("\n"));
     } catch (e: any) {
       return err(e.message);
+    }
+  },
+);
+
+// ─── add_init_script ─────────────────────────────────────────────────────
+
+server.registerTool(
+  "add_init_script",
+  {
+    title: "Add Init Script",
+    description:
+      "Inject JavaScript that runs before every page load in a session. " +
+      "Persists across navigations (Playwright built-in behavior). " +
+      "Use for fingerprint overrides, custom stealth patches, or page instrumentation.",
+    inputSchema: z.object({
+      sessionId: z.string().describe("Session ID."),
+      script: z.string().describe("JavaScript code to inject. Runs in page context before any page scripts."),
+    }),
+  },
+  async ({ sessionId, script }) => {
+    try {
+      const session = requireSession(sessionId);
+      // Apply to all current pages in the session
+      const pages = session.context.pages();
+      for (const page of pages) {
+        await page.addInitScript(script);
+      }
+      return ok(`Init script added to session ${sessionId} (${pages.length} page(s)). Will persist across navigations.`);
+    } catch (e: any) {
+      return err(`addInitScript failed: ${e.message}`);
+    }
+  },
+);
+
+// ─── batch_actions ────────────────────────────────────────────────────────
+
+const BatchActionSchema = z.object({
+  action: z
+    .enum(["click", "dblclick", "fill", "type", "check", "uncheck", "select", "press", "scroll", "hover", "mousemove", "back", "forward"])
+    .describe("Interaction to perform."),
+  target: z.string().optional().describe("@eN ref or CSS selector."),
+  value: z.string().optional().describe("Text for fill/type, option value for select."),
+  key: z.string().optional().describe("Key name for press."),
+  scrollDirection: z.enum(["up", "down", "left", "right"]).optional().describe("Scroll direction."),
+  scrollAmount: z.number().int().optional().describe("Pixels to scroll."),
+  typeDelay: z.number().optional().describe("Delay in ms between keystrokes for type."),
+  x: z.number().optional().describe("X coordinate for mousemove."),
+  y: z.number().optional().describe("Y coordinate for mousemove."),
+  delayAfter: z.number().optional().describe("Delay in ms to wait after this action completes."),
+});
+
+server.registerTool(
+  "batch_actions",
+  {
+    title: "Batch Actions",
+    description:
+      "Execute multiple browser actions sequentially in a single MCP call. " +
+      "Eliminates round-trip overhead for humanization sequences (e.g. Bezier mouse paths, typed text with delays). " +
+      "Each action can have an optional delayAfter (ms) to pause between steps. " +
+      "Returns a single result with the outcome of each action.",
+    inputSchema: z.object({
+      sessionId: z.string().describe("Session ID."),
+      actions: z.array(BatchActionSchema).min(1).max(100).describe("Array of actions to execute sequentially."),
+    }),
+  },
+  async ({ sessionId, actions }) => {
+    try {
+      const session = requireSession(sessionId);
+      const page = getPage(session);
+      const results: string[] = [];
+
+      const resolve = (ref: string) => {
+        if (ref.startsWith("@e")) {
+          const selector = session.refMap.get(ref);
+          if (!selector) throw new Error(`Ref ${ref} not found. Take a fresh snapshot.`);
+          return page.locator(selector);
+        }
+        return page.locator(ref);
+      };
+
+      for (let i = 0; i < actions.length; i++) {
+        const a = actions[i];
+        try {
+          switch (a.action) {
+            case "click":
+            case "dblclick":
+            case "hover": {
+              if (!a.target) throw new Error(`'${a.action}' requires a target`);
+              const loc = resolve(a.target);
+              if (a.action === "dblclick") await loc.dblclick();
+              else if (a.action === "hover") await loc.hover();
+              else await loc.click();
+              break;
+            }
+            case "fill": {
+              if (!a.target || a.value === undefined) throw new Error("'fill' requires target and value");
+              await resolve(a.target).fill(a.value);
+              break;
+            }
+            case "type": {
+              if (!a.target || a.value === undefined) throw new Error("'type' requires target and value");
+              const opts: { delay?: number } = {};
+              if (a.typeDelay !== undefined) opts.delay = a.typeDelay;
+              await resolve(a.target).pressSequentially(a.value, opts);
+              break;
+            }
+            case "check":
+            case "uncheck": {
+              if (!a.target) throw new Error(`'${a.action}' requires a target`);
+              if (a.action === "check") await resolve(a.target).check();
+              else await resolve(a.target).uncheck();
+              break;
+            }
+            case "select": {
+              if (!a.target || a.value === undefined) throw new Error("'select' requires target and value");
+              await resolve(a.target).selectOption(a.value);
+              break;
+            }
+            case "press": {
+              if (!a.key) throw new Error("'press' requires a key");
+              await page.keyboard.press(a.key);
+              break;
+            }
+            case "scroll": {
+              if (a.target) {
+                await resolve(a.target).scrollIntoViewIfNeeded();
+              } else {
+                const dir = a.scrollDirection ?? "down";
+                const px = a.scrollAmount ?? 300;
+                const deltaX = dir === "right" ? px : dir === "left" ? -px : 0;
+                const deltaY = dir === "down" ? px : dir === "up" ? -px : 0;
+                await page.mouse.wheel(deltaX, deltaY);
+              }
+              break;
+            }
+            case "mousemove": {
+              if (a.x === undefined || a.y === undefined) throw new Error("'mousemove' requires x and y");
+              await page.mouse.move(a.x, a.y);
+              break;
+            }
+            case "back":
+              await page.goBack();
+              break;
+            case "forward":
+              await page.goForward();
+              break;
+          }
+          results.push(`[${i}] ${a.action}: ok`);
+        } catch (actionErr: any) {
+          results.push(`[${i}] ${a.action}: FAILED — ${actionErr.message}`);
+          // Stop batch on first failure to avoid cascading errors
+          break;
+        }
+
+        // Optional delay between actions
+        if (a.delayAfter && a.delayAfter > 0) {
+          await new Promise((r) => setTimeout(r, Math.min(a.delayAfter!, 10000)));
+        }
+      }
+
+      return ok(`Batch complete (${results.length}/${actions.length} actions)\n\n${results.join("\n")}`);
+    } catch (e: any) {
+      return err(`Batch failed: ${e.message}`);
     }
   },
 );
