@@ -189,6 +189,9 @@ export class SessionManager implements ISessionManager {
     if (opts?.acceptDownloads !== undefined) {
       contextOpts.acceptDownloads = opts.acceptDownloads;
     }
+    if (opts?.proxy) {
+      contextOpts.proxy = opts.proxy;
+    }
 
     if (opts?.storageState) {
       try {
