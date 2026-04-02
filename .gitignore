@@ -3,22 +3,37 @@ node_modules/
 dist/
 .env
 .DS_Store
-*.tgz
 coverage/
 .vscode/
 .gstack/
 
-# Internal strategy docs (not for public repo)
-internal/
-research/
-
-# Session handoffs and internal planning
-HANDOFF-V030.md
-SESSION-HANDOFF-APR1.md
-GTM-PLAN.md
-DON-COPY-PACKAGE.md
+# Internal strategy docs — never publish
+MASTER-PLAN.md
+STRESS-TEST-PLAN.md
+DESIGN-SYSTEM.md
 BRAND-IDENTITY-FULL.md
+BRAND.md
+GTM-PLAN.md
+LAUNCH.md
+DON-COPY-PACKAGE.md
 SIZZLE-REEL-STORYBOARD.md
-BENCHMARK-RESULTS.md
-PACKAGING-AUDIT.md
 COOKIE-AND-ROADMAP-ANALYSIS.md
+PACKAGING-AUDIT.md
+AUDIT-CHECKPOINT.md
+SESSION-HANDOFF-APR1.md
+council-*.md
+BENCHMARK-RESULTS.md
+ROADMAP.md
+TEST-PLAN.md
+HANDOFF*.md
+research/
+qa-loop/
+qa-loop.tar.gz
+internal/
+*.tgz
+
+# Build artifacts
+dist/
+
+# Screenshots
+leapfrog-screenshots/
