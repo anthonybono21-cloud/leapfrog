@@ -169,9 +169,18 @@ server.registerTool(
         .boolean()
         .optional()
         .describe("Enable/disable stealth mode for this session. Default: true (uses global setting)."),
+      proxy: z
+        .object({
+          server: z.string().describe("Proxy server URL (e.g. 'http://proxy:8080', 'socks5://proxy:1080')."),
+          username: z.string().optional().describe("Proxy auth username."),
+          password: z.string().optional().describe("Proxy auth password."),
+          bypass: z.string().optional().describe("Comma-separated domains to bypass proxy (e.g. 'localhost,.example.com')."),
+        })
+        .optional()
+        .describe("Per-session proxy configuration. Each session can use a different proxy."),
     }),
   },
-  async ({ profilePath, viewport, userAgent, locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth }) => {
+  async ({ profilePath, viewport, userAgent, locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth, proxy }) => {
     try {
       // Validate profilePath stays within the profiles directory
       if (profilePath) {
@@ -187,7 +196,7 @@ server.registerTool(
       }
       const session = await sessions.createSession({
         profilePath, viewport, userAgent,
-        locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth,
+        locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth, proxy,
       });
       const stats = sessions.getStats();
       return ok(
