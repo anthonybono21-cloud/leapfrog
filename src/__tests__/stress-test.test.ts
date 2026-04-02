@@ -497,11 +497,12 @@ describe("Test 4: Tab management under stress", () => {
         await p.setContent(simplePage(label));
       }
 
-      // Active tab should be the last one opened (index 4, "E")
+      // BUG-002 fix: new pages no longer auto-switch activePageIndex.
+      // Active tab stays at 0 (the original page) until explicitly switched.
       let tabList = await tabs.listTabs(session);
       expect(tabList.length).toBe(5);
       const activeAfterOpen = tabList.find((t) => t.isActive);
-      expect(activeAfterOpen?.index).toBe(4);
+      expect(activeAfterOpen?.index).toBe(0);
 
       // Switch to tab 2 ("C")
       tabs.switchTab(session, 2);
@@ -582,7 +583,7 @@ describe("Test 5: Popup / new window handling", () => {
   });
 
   it(
-    "window.open popup appears in tab list and becomes active",
+    "window.open popup appears in tab list but does NOT auto-switch (BUG-002)",
     async () => {
       const session = await manager.createSession();
 
@@ -610,16 +611,16 @@ describe("Test 5: Popup / new window handling", () => {
       const tabListAfter = await tabs.listTabs(session);
       expect(tabListAfter.length).toBe(2);
 
-      // The popup should be the active tab (auto-activated by TabManager)
+      // BUG-002: The original tab should stay active (popup does NOT auto-switch)
       const activeTab = tabListAfter.find((t) => t.isActive);
       expect(activeTab).toBeDefined();
-      expect(activeTab!.index).toBe(1); // Popup is index 1
+      expect(activeTab!.index).toBe(0); // Original stays active
 
       const activePage = tabs.getActivePage(session);
       const activeTitle = await activePage.title();
-      expect(activeTitle).toBe("Popup");
+      expect(activeTitle).toBe("Opener");
 
-      console.log("[Test 5] Popup detected and auto-activated.");
+      console.log("[Test 5] Popup detected, original tab stays active (BUG-002 fix).");
 
       await manager.destroySession(session.id);
     },
@@ -627,7 +628,7 @@ describe("Test 5: Popup / new window handling", () => {
   );
 
   it(
-    "can switch back to original tab after popup",
+    "can switch to popup tab and back to original (BUG-002)",
     async () => {
       const session = await manager.createSession();
       await session.page.setContent(simplePage("Original"));
@@ -642,9 +643,15 @@ describe("Test 5: Popup / new window handling", () => {
       await new Promise((r) => setTimeout(r, 100));
       await newPage.setContent(simplePage("Popup-Window"));
 
-      // Verify we're on the popup
+      // BUG-002: We should still be on the original tab
       let activePage = tabs.getActivePage(session);
       let title = await activePage.title();
+      expect(title).toBe("Original");
+
+      // Explicitly switch to the popup (index 1)
+      tabs.switchTab(session, 1);
+      activePage = tabs.getActivePage(session);
+      title = await activePage.title();
       expect(title).toBe("Popup-Window");
 
       // Switch back to original (index 0)
@@ -653,7 +660,7 @@ describe("Test 5: Popup / new window handling", () => {
       title = await activePage.title();
       expect(title).toBe("Original");
 
-      console.log("[Test 5] Switch back to original tab after popup works.");
+      console.log("[Test 5] Switch to popup and back to original tab works (BUG-002 fix).");
 
       await manager.destroySession(session.id);
     },
@@ -678,7 +685,7 @@ describe("Test 5: Popup / new window handling", () => {
       let tabList = await tabs.listTabs(session);
       expect(tabList.length).toBe(2);
 
-      // Close the popup (index 1, which is active)
+      // Close the popup (index 1 — not active due to BUG-002 fix)
       await tabs.closeTab(session, 1);
 
       tabList = await tabs.listTabs(session);
@@ -697,7 +704,7 @@ describe("Test 5: Popup / new window handling", () => {
   );
 
   it(
-    "multiple popups are tracked correctly",
+    "multiple popups are tracked correctly (BUG-002)",
     async () => {
       const session = await manager.createSession();
       await session.page.setContent(simplePage("Root"));
@@ -717,11 +724,11 @@ describe("Test 5: Popup / new window handling", () => {
       const tabList = await tabs.listTabs(session);
       expect(tabList.length).toBe(4); // 1 original + 3 popups
 
-      // Most recent popup should be active
+      // BUG-002: Original tab should stay active (index 0)
       const activeTab = tabList.find((t) => t.isActive);
-      expect(activeTab!.index).toBe(3);
+      expect(activeTab!.index).toBe(0);
 
-      // Verify all tabs are accessible
+      // Verify all tabs are accessible via explicit switching
       for (let i = 0; i < tabList.length; i++) {
         const page = tabs.switchTab(session, i);
         const title = await page.title();
@@ -732,7 +739,7 @@ describe("Test 5: Popup / new window handling", () => {
         }
       }
 
-      console.log("[Test 5] Multiple popups tracked and accessible.");
+      console.log("[Test 5] Multiple popups tracked and accessible (BUG-002 fix).");
 
       await manager.destroySession(session.id);
     },

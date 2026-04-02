@@ -67,9 +67,9 @@ describe('SessionManager', () => {
     expect(manager.getSession(id)).toBeUndefined();
   });
 
-  it('does not throw when destroying a nonexistent session', async () => {
-    // Should resolve without error
-    await expect(manager.destroySession('s_nope00')).resolves.toBeUndefined();
+  it('throws when destroying a nonexistent session (BUG-007)', async () => {
+    // Double-destroy or nonexistent session should throw
+    await expect(manager.destroySession('s_nope00')).rejects.toThrow(/not found/);
   });
 
   // ── List ──────────────────────────────────────────────────────────

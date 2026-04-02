@@ -40,14 +40,13 @@ export class TabManager {
     session.activePageIndex = 0;
 
     // Listen for new pages (popups, window.open, target=_blank links)
+    // BUG-002: Do NOT auto-switch activePageIndex to popup — keep the original
+    // page active. Popups are tracked but the caller must explicitly switch.
     context.on("page", (newPage: Page) => {
       const { pages } = ensureInitialized(session);
 
-      // Add to pages array
+      // Add to pages array (but do NOT change activePageIndex)
       pages.push(newPage);
-
-      // Make the new tab active — most common UX for popups/OAuth flows
-      session.activePageIndex = pages.length - 1;
 
       // Auto-dismiss dialogs on the new page (same pattern as session-manager)
       newPage.on("dialog", (dialog) => dialog.dismiss().catch(() => {}));
@@ -334,8 +333,19 @@ export class TabManager {
     session.pages = openPages;
 
     if (openPages.length === 0) {
-      // All pages closed — this is a degenerate state, nothing we can do
+      // BUG-002: All pages closed — create a recovery page in the same context
+      // so the session stays usable instead of becoming a zombie.
       session.activePageIndex = 0;
+      session.context.newPage().then((recoveryPage) => {
+        if (!session.pages) session.pages = [];
+        session.pages.push(recoveryPage);
+        session.page = recoveryPage;
+        session.activePageIndex = 0;
+        // Auto-dismiss dialogs on recovery page
+        recoveryPage.on("dialog", (d) => d.dismiss().catch(() => {}));
+      }).catch(() => {
+        // Context may be dead — session will fail on next access
+      });
       return;
     }
 
