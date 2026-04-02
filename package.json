@@ -1,6 +1,6 @@
 {
   "name": "leapfrog",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Multi-session browser MCP for AI agents — 19 tools, up to 10x fewer tokens than Playwright, stealth mode",
   "type": "module",
   "main": "dist/index.js",
