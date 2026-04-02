@@ -111,11 +111,16 @@ export class SessionManager {
         const context = await browser.newContext(contextOpts);
         const page = await context.newPage();
         // Apply stealth init scripts to evade bot detection
+        // Pass userAgent so platform inference (P2 #9) matches the UA string
         if (stealth.isEnabled()) {
-            await stealth.applyToPage(page);
+            await stealth.applyToPage(page, opts?.userAgent);
         }
         // Auto-dismiss browser dialogs (alert, confirm, prompt) to prevent session hangs
-        page.on("dialog", (dialog) => dialog.dismiss().catch(() => { }));
+        // P1 #6: Add 200-500ms random delay — instant dismiss (< 30ms) is a headless signal
+        page.on("dialog", (dialog) => {
+            const delay = stealth.isEnabled() ? stealth.getDialogDelay() : 0;
+            setTimeout(() => dialog.dismiss().catch(() => { }), delay);
+        });
         // Generate a unique short ID
         let id;
         do {

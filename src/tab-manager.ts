@@ -1,5 +1,6 @@
 import type { BrowserContext, Page } from "playwright";
 import type { Session, TabInfo, WaitCondition } from "./types.js";
+import { stealth } from "./stealth.js";
 
 // ─── Tab Manager ──────────────────────────────────────────────────────────
 //
@@ -50,7 +51,11 @@ export class TabManager {
       session.activePageIndex = pages.length - 1;
 
       // Auto-dismiss dialogs on the new page (same pattern as session-manager)
-      newPage.on("dialog", (dialog) => dialog.dismiss().catch(() => {}));
+      // P1 #6: Add 200-500ms random delay — instant dismiss (< 30ms) is a headless signal
+      newPage.on("dialog", (dialog) => {
+        const delay = stealth.isEnabled() ? stealth.getDialogDelay() : 0;
+        setTimeout(() => dialog.dismiss().catch(() => {}), delay);
+      });
 
       // When this page closes, clean it from the array
       newPage.on("close", () => {
