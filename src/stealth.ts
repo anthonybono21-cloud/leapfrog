@@ -14,6 +14,9 @@ export class StealthMode {
   getLaunchArgs(): string[] {
     return [
       "--disable-blink-features=AutomationControlled",
+      // BUG-003: Disable AutomationControlled feature flag to prevent
+      // "HeadlessChrome" from appearing in Client Hints brands
+      "--disable-features=AutomationControlled",
       "--disable-dev-shm-usage",
       "--no-first-run",
       "--no-default-browser-check",
@@ -34,10 +37,57 @@ export class StealthMode {
   getInitScript(): string {
     return `
       // ── Hide navigator.webdriver ──────────────────────────────────────
+      // BUG-004: Use delete + defineProperty + prototype patch for full coverage.
+      // Some detection scripts check the prototype directly or use 'in' operator.
+      delete Object.getPrototypeOf(navigator).webdriver;
       Object.defineProperty(navigator, 'webdriver', {
-        get: () => undefined,
+        get: () => false,
         configurable: true,
       });
+      // Also patch on Navigator.prototype for 'webdriver' in navigator checks
+      if (Object.getOwnPropertyDescriptor(Navigator.prototype, 'webdriver')) {
+        Object.defineProperty(Navigator.prototype, 'webdriver', {
+          get: () => false,
+          configurable: true,
+        });
+      }
+
+      // ── BUG-003: Override Client Hints brands to hide HeadlessChrome ──
+      if (navigator.userAgentData) {
+        const realBrands = navigator.userAgentData.brands;
+        const patchedBrands = realBrands
+          ? realBrands.map(b => ({
+              ...b,
+              brand: b.brand.replace(/HeadlessChrome/gi, 'Google Chrome'),
+            }))
+          : [
+              { brand: 'Chromium', version: '131' },
+              { brand: 'Google Chrome', version: '131' },
+              { brand: 'Not_A Brand', version: '24' },
+            ];
+        Object.defineProperty(navigator.userAgentData, 'brands', {
+          get: () => patchedBrands,
+          configurable: true,
+        });
+        // Also patch getHighEntropyValues to filter HeadlessChrome
+        const origGetHEV = navigator.userAgentData.getHighEntropyValues.bind(navigator.userAgentData);
+        navigator.userAgentData.getHighEntropyValues = async function(hints) {
+          const values = await origGetHEV(hints);
+          if (values.brands) {
+            values.brands = values.brands.map(b => ({
+              ...b,
+              brand: b.brand.replace(/HeadlessChrome/gi, 'Google Chrome'),
+            }));
+          }
+          if (values.fullVersionList) {
+            values.fullVersionList = values.fullVersionList.map(b => ({
+              ...b,
+              brand: b.brand.replace(/HeadlessChrome/gi, 'Google Chrome'),
+            }));
+          }
+          return values;
+        };
+      }
 
       // ── Fake window.chrome object ─────────────────────────────────────
       if (!window.chrome) {
@@ -201,22 +251,30 @@ export class StealthMode {
 
   /**
    * BrowserContext options to merge into context creation.
-   * Returns stealth-appropriate defaults (user agent, locale, timezone, headers).
-   * Returns empty object if stealth is disabled or a custom user agent was provided.
+   * Returns stealth-appropriate defaults (locale, timezone, headers).
+   * BUG-005: When a custom user agent is provided, still return ALL other
+   * stealth options (locale, timezone, headers) — only skip the default UA.
+   * Returns empty object only if stealth is fully disabled.
    */
   getContextOptions(customUserAgent?: string): Record<string, unknown> {
-    if (!this.isEnabled() || customUserAgent) {
+    if (!this.isEnabled()) {
       return {};
     }
 
-    return {
-      userAgent: this.getDefaultUserAgent(),
+    const opts: Record<string, unknown> = {
       locale: "en-US",
       timezoneId: "America/New_York",
       extraHTTPHeaders: {
         "Accept-Language": "en-US,en;q=0.9",
       },
     };
+
+    // Only inject the default UA when no custom one is provided
+    if (!customUserAgent) {
+      opts.userAgent = this.getDefaultUserAgent();
+    }
+
+    return opts;
   }
 }
 

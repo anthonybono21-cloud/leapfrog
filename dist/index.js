@@ -15,10 +15,11 @@ import { crashRecovery } from "./crash-recovery.js";
 import { logger } from "./logger.js";
 // ─── Config ─────────────────────────────────────────────────────────────────
 const MAX_SESSIONS = Number(process.env.LEAP_MAX_SESSIONS ?? 15);
-const IDLE_TIMEOUT_MS = Number(process.env.LEAP_IDLE_TIMEOUT ?? 5 * 60 * 1000);
+// BUG-001: Default to 30 min; allow LEAP_IDLE_TIMEOUT=0 to disable sweep entirely
+const IDLE_TIMEOUT_MS = Number(process.env.LEAP_IDLE_TIMEOUT ?? 30 * 60 * 1000);
 if (!Number.isFinite(MAX_SESSIONS) || MAX_SESSIONS < 1)
     throw new Error("Invalid LEAP_MAX_SESSIONS");
-if (!Number.isFinite(IDLE_TIMEOUT_MS) || IDLE_TIMEOUT_MS < 1000)
+if (!Number.isFinite(IDLE_TIMEOUT_MS) || IDLE_TIMEOUT_MS < 0)
     throw new Error("Invalid LEAP_IDLE_TIMEOUT");
 const HEADLESS = process.env.LEAP_HEADLESS !== "false";
 const SCREENSHOT_DIR = path.join(os.homedir(), "Documents", "leapfrog-screenshots");

@@ -108,17 +108,36 @@ export class NetworkIntelligence {
     // Initialize arrays on the session
     ensureSessionArrays(session);
 
+    // BUG-006: Track request start times via wall clock as a fallback
+    // for when Playwright timing() returns zeros.
+    const requestStartTimes = new Map<string, number>();
+    page.on("request", (request) => {
+      requestStartTimes.set(request.url() + request.method(), Date.now());
+    });
+
     // --- Network response listener ---
     page.on("response", async (response: Response) => {
       try {
         const request = response.request();
         const timing = request.timing();
 
-        // Duration: time from request start to response end
-        // Playwright timing().responseEnd is ms from navigationStart, -1 if unavailable
+        // BUG-006: Duration calculation with multiple fallbacks.
+        // 1. Prefer Playwright's built-in timing (responseEnd - requestStart)
+        // 2. Fall back to (responseEnd - startTime) if requestStart is missing
+        // 3. Final fallback: wall-clock delta from our request listener
         let duration = 0;
         if (timing.responseEnd > 0 && timing.requestStart > 0) {
           duration = Math.round(timing.responseEnd - timing.requestStart);
+        } else if (timing.responseEnd > 0 && timing.startTime > 0) {
+          duration = Math.round(timing.responseEnd - timing.startTime);
+        } else {
+          // Wall-clock fallback
+          const key = request.url() + request.method();
+          const wallStart = requestStartTimes.get(key);
+          if (wallStart) {
+            duration = Date.now() - wallStart;
+            requestStartTimes.delete(key);
+          }
         }
 
         const url = response.url();

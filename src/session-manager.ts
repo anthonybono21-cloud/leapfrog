@@ -16,7 +16,7 @@ import { logger } from "./logger.js";
 
 const DEFAULT_CONFIG: SessionManagerConfig = {
   maxSessions: 10,
-  idleTimeoutMs: 5 * 60 * 1000,
+  idleTimeoutMs: 30 * 60 * 1000,
   cleanupIntervalMs: 30 * 1000,
   defaultViewport: { width: 1280, height: 720 },
   headless: true,
@@ -49,9 +49,22 @@ export class SessionManager implements ISessionManager {
       return this.browser;
     }
 
-    // Previous browser crashed or was never launched — clean up stale state
+    // Previous browser crashed or was never launched — clean up only stale sessions
+    // BUG-008: Only clear sessions whose contexts belong to the dead browser
     if (this.browser) {
-      this.sessions.clear();
+      for (const [id, session] of this.sessions) {
+        try {
+          // If the context's browser is the crashed one, remove it
+          if (session.context.browser() === this.browser) {
+            this.sessions.delete(id);
+            networkIntelligence.cleanupSession(id);
+          }
+        } catch {
+          // Context access failed — it's dead, remove the session
+          this.sessions.delete(id);
+          networkIntelligence.cleanupSession(id);
+        }
+      }
       this.browser = null;
     }
 
@@ -62,10 +75,26 @@ export class SessionManager implements ISessionManager {
     this.browser = await chromium.launch(launchOpts);
     logger.info("browser.launched", { headless: this.config.headless, stealth: stealth.isEnabled() });
 
-    // Attach crash recovery — auto-clears sessions on unexpected disconnect
+    // Attach crash recovery — clears only sessions belonging to the crashed browser
+    // BUG-008: Don't wipe ALL sessions; only those on the dead browser
+    const crashedBrowser = this.browser;
     crashRecovery.attachToBrowser(this.browser, () => {
-      logger.error("browser.crash_recovery", { sessionsLost: this.sessions.size });
-      this.sessions.clear();
+      let cleared = 0;
+      for (const [id, session] of this.sessions) {
+        try {
+          if (session.context.browser() === crashedBrowser) {
+            this.sessions.delete(id);
+            networkIntelligence.cleanupSession(id);
+            cleared++;
+          }
+        } catch {
+          // Context access failed — it's dead
+          this.sessions.delete(id);
+          networkIntelligence.cleanupSession(id);
+          cleared++;
+        }
+      }
+      logger.error("browser.crash_recovery", { sessionsLost: cleared, sessionsRemaining: this.sessions.size });
       this.browser = null;
     });
 
@@ -98,6 +127,9 @@ export class SessionManager implements ISessionManager {
   // ── Idle sweep ─────────────────────────────────────────────────────
 
   private async sweepIdle(): Promise<void> {
+    // BUG-001: idleTimeoutMs === 0 disables the sweep entirely
+    if (this.config.idleTimeoutMs <= 0) return;
+
     const now = Date.now();
     const expired: string[] = [];
 
@@ -153,6 +185,49 @@ export class SessionManager implements ISessionManager {
     // Auto-dismiss browser dialogs (alert, confirm, prompt) to prevent session hangs
     page.on("dialog", (dialog) => dialog.dismiss().catch(() => {}));
 
+    // BUG-009: Handle page crashes — mark session as unhealthy and attempt recovery
+    page.on("crash", () => {
+      logger.error("page.crashed", { contextId: context.constructor.name });
+      // Attempt to create a replacement page in the same context
+      context.newPage().then((newPage) => {
+        // Find the session that owns this context
+        for (const [, s] of this.sessions) {
+          if (s.context === context) {
+            s.page = newPage;
+            // Replace crashed page in pages array if tab manager initialized it
+            if (s.pages) {
+              const crashedIdx = s.pages.indexOf(page);
+              if (crashedIdx >= 0) {
+                s.pages[crashedIdx] = newPage;
+              } else {
+                s.pages.push(newPage);
+              }
+            }
+            // Re-apply stealth to the new page
+            if (stealth.isEnabled()) {
+              stealth.applyToPage(newPage).catch(() => {});
+            }
+            // Re-wire network intelligence
+            networkIntelligence.attachToPage(newPage, s);
+            // Auto-dismiss dialogs on replacement page
+            newPage.on("dialog", (d) => d.dismiss().catch(() => {}));
+            logger.info("page.crash_recovered", { id: s.id });
+            break;
+          }
+        }
+      }).catch(() => {
+        // Context itself may be dead — mark session for cleanup
+        for (const [id, s] of this.sessions) {
+          if (s.context === context) {
+            logger.error("page.crash_recovery_failed", { id });
+            this.sessions.delete(id);
+            networkIntelligence.cleanupSession(id);
+            break;
+          }
+        }
+      });
+    });
+
     // Generate a unique short ID
     let id: string;
     do {
@@ -198,7 +273,9 @@ export class SessionManager implements ISessionManager {
 
   async destroySession(id: string): Promise<void> {
     const session = this.sessions.get(id);
-    if (!session) return;
+    if (!session) {
+      throw new Error(`Session "${id}" not found — already destroyed or never existed.`);
+    }
 
     this.sessions.delete(id);
     networkIntelligence.cleanupSession(id);
