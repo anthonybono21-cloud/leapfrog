@@ -13,6 +13,8 @@ import { crashRecovery } from "./crash-recovery.js";
 import { networkIntelligence } from "./network-intelligence.js";
 import { tabManager } from "./tab-manager.js";
 import { logger } from "./logger.js";
+import { generateFingerprint } from "./humanize-fingerprint.js";
+import { isHumanizeEnabled } from "./humanize-utils.js";
 
 const DEFAULT_CONFIG: SessionManagerConfig = {
   maxSessions: 10,
@@ -166,6 +168,28 @@ export class SessionManager implements ISessionManager {
     const stealthOpts = useStealth ? stealth.getContextOptions(opts?.userAgent) : {};
     const contextOpts: Record<string, unknown> = { viewport, ...stealthOpts };
 
+    // Apply humanized fingerprint when LEAP_HUMANIZE is enabled.
+    // Fingerprint provides coherent browser identity (UA, viewport, locale, timezone, etc.)
+    // that can be overridden by explicit user opts below.
+    if (isHumanizeEnabled()) {
+      const fp = generateFingerprint();
+      if (!opts?.userAgent) {
+        contextOpts.userAgent = fp.userAgent;
+      }
+      if (!opts?.viewport) {
+        contextOpts.viewport = fp.viewport;
+      }
+      if (!opts?.locale) {
+        contextOpts.locale = fp.languages[0]?.split("-")[0] ?? "en";
+      }
+      if (!opts?.timezoneId) {
+        contextOpts.timezoneId = fp.timezone;
+      }
+      // Store fingerprint data for init script injection (WebGL, navigator properties)
+      contextOpts._humanizeFingerprint = fp;
+      logger.info("session.humanize_fingerprint", { userAgent: fp.userAgent, timezone: fp.timezone, screen: `${fp.screen.width}x${fp.screen.height}` });
+    }
+
     if (opts?.userAgent) {
       contextOpts.userAgent = opts.userAgent;
     }
@@ -203,6 +227,10 @@ export class SessionManager implements ISessionManager {
       contextOpts.storageState = opts.profilePath;
     }
 
+    // Extract fingerprint before passing opts to Playwright (not a Playwright option)
+    const humanizeFingerprint = contextOpts._humanizeFingerprint as ReturnType<typeof generateFingerprint> | undefined;
+    delete contextOpts._humanizeFingerprint;
+
     const context = await browser.newContext(contextOpts);
     const page = await context.newPage();
 
@@ -210,6 +238,46 @@ export class SessionManager implements ISessionManager {
     // Pass userAgent so platform inference (P2 #9) matches the UA string
     if (useStealth) {
       await stealth.applyToPage(page, opts?.userAgent);
+    }
+
+    // Apply humanized fingerprint overrides (navigator, screen, WebGL properties)
+    if (humanizeFingerprint) {
+      const fp = humanizeFingerprint;
+      await page.addInitScript(`(() => {
+        // Navigator property overrides
+        Object.defineProperty(navigator, 'platform', { get: () => ${JSON.stringify(fp.platform)} });
+        Object.defineProperty(navigator, 'deviceMemory', { get: () => ${fp.deviceMemory} });
+        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => ${fp.hardwareConcurrency} });
+        Object.defineProperty(navigator, 'languages', { get: () => ${JSON.stringify(fp.languages)} });
+        Object.defineProperty(navigator, 'cookieEnabled', { get: () => ${fp.cookieEnabled} });
+        Object.defineProperty(navigator, 'pdfViewerEnabled', { get: () => ${fp.pdfViewerEnabled} });
+        ${fp.doNotTrack !== null ? `Object.defineProperty(navigator, 'doNotTrack', { get: () => ${JSON.stringify(fp.doNotTrack)} });` : ''}
+        Object.defineProperty(navigator, 'maxTouchPoints', { get: () => ${fp.maxTouchPoints} });
+
+        // Screen property overrides
+        Object.defineProperty(screen, 'width', { get: () => ${fp.screen.width} });
+        Object.defineProperty(screen, 'height', { get: () => ${fp.screen.height} });
+        Object.defineProperty(screen, 'colorDepth', { get: () => ${fp.colorDepth} });
+
+        // WebGL renderer/vendor override
+        const origGetParameter = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(param) {
+          if (param === 0x9245) return ${JSON.stringify(fp.webgl.vendor)};   // UNMASKED_VENDOR_WEBGL
+          if (param === 0x9246) return ${JSON.stringify(fp.webgl.renderer)}; // UNMASKED_RENDERER_WEBGL
+          return origGetParameter.call(this, param);
+        };
+        if (typeof WebGL2RenderingContext !== 'undefined') {
+          const origGetParameter2 = WebGL2RenderingContext.prototype.getParameter;
+          WebGL2RenderingContext.prototype.getParameter = function(param) {
+            if (param === 0x9245) return ${JSON.stringify(fp.webgl.vendor)};
+            if (param === 0x9246) return ${JSON.stringify(fp.webgl.renderer)};
+            return origGetParameter2.call(this, param);
+          };
+        }
+
+        // Device pixel ratio
+        Object.defineProperty(window, 'devicePixelRatio', { get: () => ${fp.devicePixelRatio} });
+      })();`);
     }
 
     // Auto-dismiss browser dialogs (alert, confirm, prompt) to prevent session hangs

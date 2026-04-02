@@ -51,6 +51,25 @@ export function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Generate a log-normal–distributed random delay.
+ *
+ * Log-normal produces the right-skewed, heavy-tailed shape that matches
+ * real keystroke timing data (Monaco et al., 2021). The distribution has
+ * a mode slightly below the median and occasional long-tail spikes — a
+ * signature of human typing that Gaussian distributions lack.
+ *
+ * @param median - Median delay in ms (the 50th-percentile value)
+ * @param sigma  - Shape parameter controlling spread / skew (0.3–0.5 typical)
+ * @param floor  - Hard floor in ms (below 40ms is physically impossible)
+ * @returns Delay in ms, rounded to an integer
+ */
+export function logNormalDelay(median: number, sigma: number, floor = 40): number {
+  const mu = Math.log(median);
+  const normal = gaussianRandom(0, 1);
+  return Math.max(floor, Math.round(Math.exp(mu + sigma * normal)));
+}
+
+/**
  * Check whether the LEAP_HUMANIZE env var is enabled.
  * Returns false unless LEAP_HUMANIZE is explicitly set to "true" or "1".
  */

@@ -14,6 +14,11 @@ import { tabManager } from "./tab-manager.js";
 import { crashRecovery } from "./crash-recovery.js";
 import { logger } from "./logger.js";
 import { createRequire } from "module";
+import { humanMouse } from "./humanize-mouse.js";
+import { humanTyping } from "./humanize-typing.js";
+import { humanScroll } from "./humanize-scroll.js";
+import { thinkPause } from "./humanize-pause.js";
+import { isHumanizeEnabled } from "./humanize-utils.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
@@ -452,32 +457,73 @@ server.registerTool(
         case "hover": {
           if (!target) return err(`'${action}' requires a target`);
           const loc = resolve(target);
-          if (action === "dblclick") await loc.dblclick();
-          else if (action === "hover") await loc.hover();
-          else await loc.click();
+          if (action === "click") {
+            await thinkPause.beforeAction("click");
+            // Humanized click: Bezier move to target center, dwell, then click
+            if (isHumanizeEnabled()) {
+              const box = await loc.boundingBox();
+              if (box) {
+                const cx = box.x + box.width / 2;
+                const cy = box.y + box.height / 2;
+                await humanMouse.humanClick(page, cx, cy);
+              } else {
+                await loc.click();
+              }
+            } else {
+              await loc.click();
+            }
+          } else if (action === "dblclick") {
+            await thinkPause.beforeAction("click");
+            await loc.dblclick();
+          } else {
+            // hover
+            await thinkPause.beforeAction("click");
+            if (isHumanizeEnabled()) {
+              const box = await loc.boundingBox();
+              if (box) {
+                const cx = box.x + box.width / 2;
+                const cy = box.y + box.height / 2;
+                await humanMouse.moveTo(page, cx, cy);
+              } else {
+                await loc.hover();
+              }
+            } else {
+              await loc.hover();
+            }
+          }
           break;
         }
         case "fill": {
           if (!target || value === undefined) return err("'fill' requires target and value");
+          await thinkPause.beforeAction("type");
           await resolve(target).fill(value);
           break;
         }
         case "type": {
           if (!target || value === undefined) return err("'type' requires target and value");
-          const typeOpts: { delay?: number } = {};
-          if (typeDelay !== undefined) typeOpts.delay = typeDelay;
-          await resolve(target).pressSequentially(value, typeOpts);
+          await thinkPause.beforeAction("type");
+          if (isHumanizeEnabled()) {
+            // Focus the element first, then use humanized keystroke timing
+            await resolve(target).click();
+            await humanTyping.typeText(page, value);
+          } else {
+            const typeOpts: { delay?: number } = {};
+            if (typeDelay !== undefined) typeOpts.delay = typeDelay;
+            await resolve(target).pressSequentially(value, typeOpts);
+          }
           break;
         }
         case "check":
         case "uncheck": {
           if (!target) return err(`'${action}' requires a target`);
+          await thinkPause.beforeAction("click");
           if (action === "check") await resolve(target).check();
           else await resolve(target).uncheck();
           break;
         }
         case "select": {
           if (!target || value === undefined) return err("'select' requires target and value");
+          await thinkPause.beforeAction("click");
           await resolve(target).selectOption(value);
           break;
         }
@@ -487,20 +533,37 @@ server.registerTool(
           break;
         }
         case "scroll": {
+          await thinkPause.beforeAction("scroll");
           if (target) {
             await resolve(target).scrollIntoViewIfNeeded();
           } else {
             const dir = scrollDirection ?? "down";
             const px = scrollAmount ?? 300;
-            const deltaX = dir === "right" ? px : dir === "left" ? -px : 0;
-            const deltaY = dir === "down" ? px : dir === "up" ? -px : 0;
-            await page.mouse.wheel(deltaX, deltaY);
+            if (isHumanizeEnabled()) {
+              // Humanized momentum scroll
+              const deltaY = dir === "down" ? px : dir === "up" ? -px : 0;
+              const deltaX = dir === "right" ? px : dir === "left" ? -px : 0;
+              if (deltaY !== 0) {
+                await humanScroll.scroll(page, deltaY);
+              } else if (deltaX !== 0) {
+                // Horizontal scroll — humanScroll handles vertical only, fall back to wheel
+                await page.mouse.wheel(deltaX, 0);
+              }
+            } else {
+              const deltaX = dir === "right" ? px : dir === "left" ? -px : 0;
+              const deltaY = dir === "down" ? px : dir === "up" ? -px : 0;
+              await page.mouse.wheel(deltaX, deltaY);
+            }
           }
           break;
         }
         case "mousemove": {
           if (x === undefined || y === undefined) return err("'mousemove' requires x and y coordinates");
-          await page.mouse.move(x, y);
+          if (isHumanizeEnabled()) {
+            await humanMouse.moveTo(page, x, y);
+          } else {
+            await page.mouse.move(x, y);
+          }
           break;
         }
         case "drag": {
@@ -1218,6 +1281,7 @@ async function runDoctor(): Promise<void> {
   console.log(`  LEAP_CHANNEL        = ${process.env.LEAP_CHANNEL ?? "(default: bundled chromium)"}`);
   console.log(`  LEAP_ALLOW_JS       = ${process.env.LEAP_ALLOW_JS ?? "(default: true)"}`);
   console.log(`  LEAP_STEALTH        = ${process.env.LEAP_STEALTH ?? "(default: true)"}`);
+  console.log(`  LEAP_HUMANIZE       = ${process.env.LEAP_HUMANIZE ?? "(default: false)"}`);
   console.log(`  LEAP_LOG_LEVEL      = ${process.env.LEAP_LOG_LEVEL ?? "(default: info)"}`);
   console.log();
 

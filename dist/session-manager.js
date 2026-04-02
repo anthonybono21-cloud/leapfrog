@@ -4,9 +4,11 @@ import { crashRecovery } from "./crash-recovery.js";
 import { networkIntelligence } from "./network-intelligence.js";
 import { tabManager } from "./tab-manager.js";
 import { logger } from "./logger.js";
+import { generateFingerprint } from "./humanize-fingerprint.js";
+import { isHumanizeEnabled } from "./humanize-utils.js";
 const DEFAULT_CONFIG = {
     maxSessions: 10,
-    idleTimeoutMs: 5 * 60 * 1000,
+    idleTimeoutMs: 30 * 60 * 1000,
     cleanupIntervalMs: 30 * 1000,
     defaultViewport: { width: 1280, height: 720 },
     headless: true,
@@ -33,21 +35,55 @@ export class SessionManager {
         if (this.browser?.isConnected()) {
             return this.browser;
         }
-        // Previous browser crashed or was never launched — clean up stale state
+        // Previous browser crashed or was never launched — clean up only stale sessions
+        // BUG-008: Only clear sessions whose contexts belong to the dead browser
         if (this.browser) {
-            this.sessions.clear();
+            for (const [id, session] of this.sessions) {
+                try {
+                    // If the context's browser is the crashed one, remove it
+                    if (session.context.browser() === this.browser) {
+                        this.sessions.delete(id);
+                        networkIntelligence.cleanupSession(id);
+                    }
+                }
+                catch {
+                    // Context access failed — it's dead, remove the session
+                    this.sessions.delete(id);
+                    networkIntelligence.cleanupSession(id);
+                }
+            }
             this.browser = null;
         }
         const launchOpts = { headless: this.config.headless };
+        if (this.config.channel) {
+            launchOpts.channel = this.config.channel;
+        }
         if (stealth.isEnabled()) {
             launchOpts.args = stealth.getLaunchArgs();
         }
         this.browser = await chromium.launch(launchOpts);
-        logger.info("browser.launched", { headless: this.config.headless, stealth: stealth.isEnabled() });
-        // Attach crash recovery — auto-clears sessions on unexpected disconnect
+        logger.info("browser.launched", { headless: this.config.headless, channel: this.config.channel ?? "bundled", stealth: stealth.isEnabled() });
+        // Attach crash recovery — clears only sessions belonging to the crashed browser
+        // BUG-008: Don't wipe ALL sessions; only those on the dead browser
+        const crashedBrowser = this.browser;
         crashRecovery.attachToBrowser(this.browser, () => {
-            logger.error("browser.crash_recovery", { sessionsLost: this.sessions.size });
-            this.sessions.clear();
+            let cleared = 0;
+            for (const [id, session] of this.sessions) {
+                try {
+                    if (session.context.browser() === crashedBrowser) {
+                        this.sessions.delete(id);
+                        networkIntelligence.cleanupSession(id);
+                        cleared++;
+                    }
+                }
+                catch {
+                    // Context access failed — it's dead
+                    this.sessions.delete(id);
+                    networkIntelligence.cleanupSession(id);
+                    cleared++;
+                }
+            }
+            logger.error("browser.crash_recovery", { sessionsLost: cleared, sessionsRemaining: this.sessions.size });
             this.browser = null;
         });
         this.startCleanupTimer();
@@ -74,6 +110,9 @@ export class SessionManager {
     }
     // ── Idle sweep ─────────────────────────────────────────────────────
     async sweepIdle() {
+        // BUG-001: idleTimeoutMs === 0 disables the sweep entirely
+        if (this.config.idleTimeoutMs <= 0)
+            return;
         const now = Date.now();
         const expired = [];
         for (const [id, session] of this.sessions) {
@@ -96,6 +135,27 @@ export class SessionManager {
         // Build context options — merge stealth defaults
         const stealthOpts = useStealth ? stealth.getContextOptions(opts?.userAgent) : {};
         const contextOpts = { viewport, ...stealthOpts };
+        // Apply humanized fingerprint when LEAP_HUMANIZE is enabled.
+        // Fingerprint provides coherent browser identity (UA, viewport, locale, timezone, etc.)
+        // that can be overridden by explicit user opts below.
+        if (isHumanizeEnabled()) {
+            const fp = generateFingerprint();
+            if (!opts?.userAgent) {
+                contextOpts.userAgent = fp.userAgent;
+            }
+            if (!opts?.viewport) {
+                contextOpts.viewport = fp.viewport;
+            }
+            if (!opts?.locale) {
+                contextOpts.locale = fp.languages[0]?.split("-")[0] ?? "en";
+            }
+            if (!opts?.timezoneId) {
+                contextOpts.timezoneId = fp.timezone;
+            }
+            // Store fingerprint data for init script injection (WebGL, navigator properties)
+            contextOpts._humanizeFingerprint = fp;
+            logger.info("session.humanize_fingerprint", { userAgent: fp.userAgent, timezone: fp.timezone, screen: `${fp.screen.width}x${fp.screen.height}` });
+        }
         if (opts?.userAgent) {
             contextOpts.userAgent = opts.userAgent;
         }
@@ -118,6 +178,9 @@ export class SessionManager {
         if (opts?.acceptDownloads !== undefined) {
             contextOpts.acceptDownloads = opts.acceptDownloads;
         }
+        if (opts?.proxy) {
+            contextOpts.proxy = opts.proxy;
+        }
         if (opts?.storageState) {
             try {
                 contextOpts.storageState = JSON.parse(opts.storageState);
@@ -129,14 +192,104 @@ export class SessionManager {
         else if (opts?.profilePath) {
             contextOpts.storageState = opts.profilePath;
         }
+        // Extract fingerprint before passing opts to Playwright (not a Playwright option)
+        const humanizeFingerprint = contextOpts._humanizeFingerprint;
+        delete contextOpts._humanizeFingerprint;
         const context = await browser.newContext(contextOpts);
         const page = await context.newPage();
         // Apply stealth init scripts to evade bot detection
+        // Pass userAgent so platform inference (P2 #9) matches the UA string
         if (useStealth) {
-            await stealth.applyToPage(page);
+            await stealth.applyToPage(page, opts?.userAgent);
+        }
+        // Apply humanized fingerprint overrides (navigator, screen, WebGL properties)
+        if (humanizeFingerprint) {
+            const fp = humanizeFingerprint;
+            await page.addInitScript(`(() => {
+        // Navigator property overrides
+        Object.defineProperty(navigator, 'platform', { get: () => ${JSON.stringify(fp.platform)} });
+        Object.defineProperty(navigator, 'deviceMemory', { get: () => ${fp.deviceMemory} });
+        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => ${fp.hardwareConcurrency} });
+        Object.defineProperty(navigator, 'languages', { get: () => ${JSON.stringify(fp.languages)} });
+        Object.defineProperty(navigator, 'cookieEnabled', { get: () => ${fp.cookieEnabled} });
+        Object.defineProperty(navigator, 'pdfViewerEnabled', { get: () => ${fp.pdfViewerEnabled} });
+        ${fp.doNotTrack !== null ? `Object.defineProperty(navigator, 'doNotTrack', { get: () => ${JSON.stringify(fp.doNotTrack)} });` : ''}
+        Object.defineProperty(navigator, 'maxTouchPoints', { get: () => ${fp.maxTouchPoints} });
+
+        // Screen property overrides
+        Object.defineProperty(screen, 'width', { get: () => ${fp.screen.width} });
+        Object.defineProperty(screen, 'height', { get: () => ${fp.screen.height} });
+        Object.defineProperty(screen, 'colorDepth', { get: () => ${fp.colorDepth} });
+
+        // WebGL renderer/vendor override
+        const origGetParameter = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(param) {
+          if (param === 0x9245) return ${JSON.stringify(fp.webgl.vendor)};   // UNMASKED_VENDOR_WEBGL
+          if (param === 0x9246) return ${JSON.stringify(fp.webgl.renderer)}; // UNMASKED_RENDERER_WEBGL
+          return origGetParameter.call(this, param);
+        };
+        if (typeof WebGL2RenderingContext !== 'undefined') {
+          const origGetParameter2 = WebGL2RenderingContext.prototype.getParameter;
+          WebGL2RenderingContext.prototype.getParameter = function(param) {
+            if (param === 0x9245) return ${JSON.stringify(fp.webgl.vendor)};
+            if (param === 0x9246) return ${JSON.stringify(fp.webgl.renderer)};
+            return origGetParameter2.call(this, param);
+          };
+        }
+
+        // Device pixel ratio
+        Object.defineProperty(window, 'devicePixelRatio', { get: () => ${fp.devicePixelRatio} });
+      })();`);
         }
         // Auto-dismiss browser dialogs (alert, confirm, prompt) to prevent session hangs
-        page.on("dialog", (dialog) => dialog.dismiss().catch(() => { }));
+        // P1 #6: Add 200-500ms random delay — instant dismiss (< 30ms) is a headless signal
+        page.on("dialog", (dialog) => {
+            const delay = stealth.isEnabled() ? stealth.getDialogDelay() : 0;
+            setTimeout(() => dialog.dismiss().catch(() => { }), delay);
+        });
+        // BUG-009: Handle page crashes — mark session as unhealthy and attempt recovery
+        page.on("crash", () => {
+            logger.error("page.crashed", { contextId: context.constructor.name });
+            // Attempt to create a replacement page in the same context
+            context.newPage().then((newPage) => {
+                // Find the session that owns this context
+                for (const [, s] of this.sessions) {
+                    if (s.context === context) {
+                        s.page = newPage;
+                        // Replace crashed page in pages array if tab manager initialized it
+                        if (s.pages) {
+                            const crashedIdx = s.pages.indexOf(page);
+                            if (crashedIdx >= 0) {
+                                s.pages[crashedIdx] = newPage;
+                            }
+                            else {
+                                s.pages.push(newPage);
+                            }
+                        }
+                        // Re-apply stealth to the new page
+                        if (stealth.isEnabled()) {
+                            stealth.applyToPage(newPage).catch(() => { });
+                        }
+                        // Re-wire network intelligence
+                        networkIntelligence.attachToPage(newPage, s);
+                        // Auto-dismiss dialogs on replacement page
+                        newPage.on("dialog", (d) => d.dismiss().catch(() => { }));
+                        logger.info("page.crash_recovered", { id: s.id });
+                        break;
+                    }
+                }
+            }).catch(() => {
+                // Context itself may be dead — mark session for cleanup
+                for (const [id, s] of this.sessions) {
+                    if (s.context === context) {
+                        logger.error("page.crash_recovery_failed", { id });
+                        this.sessions.delete(id);
+                        networkIntelligence.cleanupSession(id);
+                        break;
+                    }
+                }
+            });
+        });
         // Generate a unique short ID
         let id;
         do {
@@ -173,8 +326,9 @@ export class SessionManager {
     }
     async destroySession(id) {
         const session = this.sessions.get(id);
-        if (!session)
-            return;
+        if (!session) {
+            throw new Error(`Session "${id}" not found — already destroyed or never existed.`);
+        }
         this.sessions.delete(id);
         networkIntelligence.cleanupSession(id);
         try {

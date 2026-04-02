@@ -13,14 +13,24 @@ import { networkIntelligence } from "./network-intelligence.js";
 import { tabManager } from "./tab-manager.js";
 import { crashRecovery } from "./crash-recovery.js";
 import { logger } from "./logger.js";
+import { createRequire } from "module";
+import { humanMouse } from "./humanize-mouse.js";
+import { humanTyping } from "./humanize-typing.js";
+import { humanScroll } from "./humanize-scroll.js";
+import { thinkPause } from "./humanize-pause.js";
+import { isHumanizeEnabled } from "./humanize-utils.js";
+const require = createRequire(import.meta.url);
+const pkg = require("../package.json");
 // ─── Config ─────────────────────────────────────────────────────────────────
 const MAX_SESSIONS = Number(process.env.LEAP_MAX_SESSIONS ?? 15);
-const IDLE_TIMEOUT_MS = Number(process.env.LEAP_IDLE_TIMEOUT ?? 5 * 60 * 1000);
+// BUG-001: Default to 30 min; allow LEAP_IDLE_TIMEOUT=0 to disable sweep entirely
+const IDLE_TIMEOUT_MS = Number(process.env.LEAP_IDLE_TIMEOUT ?? 30 * 60 * 1000);
 if (!Number.isFinite(MAX_SESSIONS) || MAX_SESSIONS < 1)
     throw new Error("Invalid LEAP_MAX_SESSIONS");
-if (!Number.isFinite(IDLE_TIMEOUT_MS) || IDLE_TIMEOUT_MS < 1000)
+if (!Number.isFinite(IDLE_TIMEOUT_MS) || IDLE_TIMEOUT_MS < 0)
     throw new Error("Invalid LEAP_IDLE_TIMEOUT");
 const HEADLESS = process.env.LEAP_HEADLESS !== "false";
+const CHANNEL = process.env.LEAP_CHANNEL || undefined; // "chrome" to use installed Chrome
 const SCREENSHOT_DIR = path.join(os.homedir(), "Documents", "leapfrog-screenshots");
 const MAX_SNAPSHOT_CHARS = 10000;
 const ALLOW_JS = process.env.LEAP_ALLOW_JS !== "false";
@@ -28,6 +38,7 @@ const sessions = new SessionManager({
     maxSessions: MAX_SESSIONS,
     idleTimeoutMs: IDLE_TIMEOUT_MS,
     headless: HEADLESS,
+    channel: CHANNEL,
 });
 const snapEngine = new SnapshotEngine();
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -93,7 +104,7 @@ async function checkSSRF(hostname) {
     return null;
 }
 // ─── Server ─────────────────────────────────────────────────────────────────
-const server = new McpServer({ name: "leapfrog", version: "0.1.0" }, { capabilities: { tools: {} } });
+const server = new McpServer({ name: "leapfrog", version: pkg.version }, { capabilities: { tools: {} } });
 // ─── session_create ─────────────────────────────────────────────────────────
 server.registerTool("session_create", {
     title: "Create Browser Session",
@@ -111,8 +122,34 @@ server.registerTool("session_create", {
             .optional()
             .describe("Custom viewport. Default: 1280x720."),
         userAgent: z.string().optional().describe("Custom user agent string."),
+        locale: z.string().optional().describe("Browser locale (e.g. 'en-US', 'fr-FR')."),
+        timezoneId: z.string().optional().describe("Timezone ID (e.g. 'America/New_York', 'Europe/London')."),
+        geolocation: z
+            .object({
+            latitude: z.number(),
+            longitude: z.number(),
+            accuracy: z.number().optional(),
+        })
+            .optional()
+            .describe("Geolocation to emulate."),
+        permissions: z
+            .array(z.string())
+            .optional()
+            .describe("Permissions to grant (e.g. ['geolocation', 'notifications'])."),
+        colorScheme: z
+            .enum(["light", "dark", "no-preference"])
+            .optional()
+            .describe("Preferred color scheme."),
+        acceptDownloads: z
+            .boolean()
+            .optional()
+            .describe("Whether to accept downloads. Default: true."),
+        stealth: z
+            .boolean()
+            .optional()
+            .describe("Enable/disable stealth mode for this session. Default: true (uses global setting)."),
     }),
-}, async ({ profilePath, viewport, userAgent }) => {
+}, async ({ profilePath, viewport, userAgent, locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth }) => {
     try {
         // Validate profilePath stays within the profiles directory
         if (profilePath) {
@@ -127,7 +164,10 @@ server.registerTool("session_create", {
                 return err(`Profile not found: ${resolved}`);
             }
         }
-        const session = await sessions.createSession({ profilePath, viewport, userAgent });
+        const session = await sessions.createSession({
+            profilePath, viewport, userAgent,
+            locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth,
+        });
         const stats = sessions.getStats();
         return ok(`Session created: ${session.id}\n` +
             `Pool: ${stats.active}/${stats.maxSessions} active`);
@@ -285,7 +325,7 @@ server.registerTool("snapshot", {
 // ─── act ────────────────────────────────────────────────────────────────────
 server.registerTool("act", {
     title: "Browser Action",
-    description: "Perform a browser interaction: click, fill, type, check, select, press key, scroll, hover, drag, upload, resize, back, forward. " +
+    description: "Perform a browser interaction: click, fill, type, check, select, press key, scroll, hover, mousemove, drag, upload, resize, back, forward. " +
         "Use @eN refs from navigate/snapshot as the target (e.g. '@e2'). CSS selectors also work. " +
         "drag: requires target (source) and target2 (destination). upload: requires target (file input) and filePaths. " +
         "resize: requires width and height (no target needed). " +
@@ -293,7 +333,7 @@ server.registerTool("act", {
     inputSchema: z.object({
         sessionId: z.string().describe("Session ID."),
         action: z
-            .enum(["click", "dblclick", "fill", "type", "check", "uncheck", "select", "press", "scroll", "hover", "drag", "upload", "resize", "back", "forward"])
+            .enum(["click", "dblclick", "fill", "type", "check", "uncheck", "select", "press", "scroll", "hover", "mousemove", "drag", "upload", "resize", "back", "forward"])
             .describe("Interaction to perform."),
         target: z
             .string()
@@ -309,6 +349,12 @@ server.registerTool("act", {
             .optional()
             .describe("Scroll direction. Default: down."),
         scrollAmount: z.number().int().optional().describe("Pixels to scroll. Default: 300."),
+        typeDelay: z
+            .number()
+            .optional()
+            .describe("Delay in ms between keystrokes for action='type'. Enables human-like typing speed."),
+        x: z.number().optional().describe("X coordinate for mousemove action."),
+        y: z.number().optional().describe("Y coordinate for mousemove action."),
         target2: z
             .string()
             .optional()
@@ -320,7 +366,7 @@ server.registerTool("act", {
         width: z.number().int().optional().describe("Viewport width for resize action."),
         height: z.number().int().optional().describe("Viewport height for resize action."),
     }),
-}, async ({ sessionId, action, target, value, key, scrollDirection, scrollAmount, target2, filePaths, width, height }) => {
+}, async ({ sessionId, action, target, value, key, scrollDirection, scrollAmount, typeDelay, x, y, target2, filePaths, width, height }) => {
     try {
         const session = requireSession(sessionId);
         const page = getPage(session);
@@ -342,30 +388,77 @@ server.registerTool("act", {
                 if (!target)
                     return err(`'${action}' requires a target`);
                 const loc = resolve(target);
-                if (action === "dblclick")
+                if (action === "click") {
+                    await thinkPause.beforeAction("click");
+                    // Humanized click: Bezier move to target center, dwell, then click
+                    if (isHumanizeEnabled()) {
+                        const box = await loc.boundingBox();
+                        if (box) {
+                            const cx = box.x + box.width / 2;
+                            const cy = box.y + box.height / 2;
+                            await humanMouse.humanClick(page, cx, cy);
+                        }
+                        else {
+                            await loc.click();
+                        }
+                    }
+                    else {
+                        await loc.click();
+                    }
+                }
+                else if (action === "dblclick") {
+                    await thinkPause.beforeAction("click");
                     await loc.dblclick();
-                else if (action === "hover")
-                    await loc.hover();
-                else
-                    await loc.click();
+                }
+                else {
+                    // hover
+                    await thinkPause.beforeAction("click");
+                    if (isHumanizeEnabled()) {
+                        const box = await loc.boundingBox();
+                        if (box) {
+                            const cx = box.x + box.width / 2;
+                            const cy = box.y + box.height / 2;
+                            await humanMouse.moveTo(page, cx, cy);
+                        }
+                        else {
+                            await loc.hover();
+                        }
+                    }
+                    else {
+                        await loc.hover();
+                    }
+                }
                 break;
             }
             case "fill": {
                 if (!target || value === undefined)
                     return err("'fill' requires target and value");
+                await thinkPause.beforeAction("type");
                 await resolve(target).fill(value);
                 break;
             }
             case "type": {
                 if (!target || value === undefined)
                     return err("'type' requires target and value");
-                await resolve(target).pressSequentially(value);
+                await thinkPause.beforeAction("type");
+                if (isHumanizeEnabled()) {
+                    // Focus the element first, then use humanized keystroke timing
+                    await resolve(target).click();
+                    await humanTyping.typeText(page, value);
+                }
+                else {
+                    const typeOpts = {};
+                    if (typeDelay !== undefined)
+                        typeOpts.delay = typeDelay;
+                    await resolve(target).pressSequentially(value, typeOpts);
+                }
                 break;
             }
             case "check":
             case "uncheck": {
                 if (!target)
                     return err(`'${action}' requires a target`);
+                await thinkPause.beforeAction("click");
                 if (action === "check")
                     await resolve(target).check();
                 else
@@ -375,6 +468,7 @@ server.registerTool("act", {
             case "select": {
                 if (!target || value === undefined)
                     return err("'select' requires target and value");
+                await thinkPause.beforeAction("click");
                 await resolve(target).selectOption(value);
                 break;
             }
@@ -385,15 +479,41 @@ server.registerTool("act", {
                 break;
             }
             case "scroll": {
+                await thinkPause.beforeAction("scroll");
                 if (target) {
                     await resolve(target).scrollIntoViewIfNeeded();
                 }
                 else {
                     const dir = scrollDirection ?? "down";
                     const px = scrollAmount ?? 300;
-                    const deltaX = dir === "right" ? px : dir === "left" ? -px : 0;
-                    const deltaY = dir === "down" ? px : dir === "up" ? -px : 0;
-                    await page.mouse.wheel(deltaX, deltaY);
+                    if (isHumanizeEnabled()) {
+                        // Humanized momentum scroll
+                        const deltaY = dir === "down" ? px : dir === "up" ? -px : 0;
+                        const deltaX = dir === "right" ? px : dir === "left" ? -px : 0;
+                        if (deltaY !== 0) {
+                            await humanScroll.scroll(page, deltaY);
+                        }
+                        else if (deltaX !== 0) {
+                            // Horizontal scroll — humanScroll handles vertical only, fall back to wheel
+                            await page.mouse.wheel(deltaX, 0);
+                        }
+                    }
+                    else {
+                        const deltaX = dir === "right" ? px : dir === "left" ? -px : 0;
+                        const deltaY = dir === "down" ? px : dir === "up" ? -px : 0;
+                        await page.mouse.wheel(deltaX, deltaY);
+                    }
+                }
+                break;
+            }
+            case "mousemove": {
+                if (x === undefined || y === undefined)
+                    return err("'mousemove' requires x and y coordinates");
+                if (isHumanizeEnabled()) {
+                    await humanMouse.moveTo(page, x, y);
+                }
+                else {
+                    await page.mouse.move(x, y);
                 }
                 break;
             }
@@ -805,6 +925,168 @@ server.registerTool("session_health", {
         return err(e.message);
     }
 });
+// ─── add_init_script ─────────────────────────────────────────────────────
+server.registerTool("add_init_script", {
+    title: "Add Init Script",
+    description: "Inject JavaScript that runs before every page load in a session. " +
+        "Persists across navigations (Playwright built-in behavior). " +
+        "Use for fingerprint overrides, custom stealth patches, or page instrumentation.",
+    inputSchema: z.object({
+        sessionId: z.string().describe("Session ID."),
+        script: z.string().describe("JavaScript code to inject. Runs in page context before any page scripts."),
+    }),
+}, async ({ sessionId, script }) => {
+    try {
+        const session = requireSession(sessionId);
+        // Apply to all current pages in the session
+        const pages = session.context.pages();
+        for (const page of pages) {
+            await page.addInitScript(script);
+        }
+        return ok(`Init script added to session ${sessionId} (${pages.length} page(s)). Will persist across navigations.`);
+    }
+    catch (e) {
+        return err(`addInitScript failed: ${e.message}`);
+    }
+});
+// ─── batch_actions ────────────────────────────────────────────────────────
+const BatchActionSchema = z.object({
+    action: z
+        .enum(["click", "dblclick", "fill", "type", "check", "uncheck", "select", "press", "scroll", "hover", "mousemove", "back", "forward"])
+        .describe("Interaction to perform."),
+    target: z.string().optional().describe("@eN ref or CSS selector."),
+    value: z.string().optional().describe("Text for fill/type, option value for select."),
+    key: z.string().optional().describe("Key name for press."),
+    scrollDirection: z.enum(["up", "down", "left", "right"]).optional().describe("Scroll direction."),
+    scrollAmount: z.number().int().optional().describe("Pixels to scroll."),
+    typeDelay: z.number().optional().describe("Delay in ms between keystrokes for type."),
+    x: z.number().optional().describe("X coordinate for mousemove."),
+    y: z.number().optional().describe("Y coordinate for mousemove."),
+    delayAfter: z.number().optional().describe("Delay in ms to wait after this action completes."),
+});
+server.registerTool("batch_actions", {
+    title: "Batch Actions",
+    description: "Execute multiple browser actions sequentially in a single MCP call. " +
+        "Eliminates round-trip overhead for humanization sequences (e.g. Bezier mouse paths, typed text with delays). " +
+        "Each action can have an optional delayAfter (ms) to pause between steps. " +
+        "Returns a single result with the outcome of each action.",
+    inputSchema: z.object({
+        sessionId: z.string().describe("Session ID."),
+        actions: z.array(BatchActionSchema).min(1).max(100).describe("Array of actions to execute sequentially."),
+    }),
+}, async ({ sessionId, actions }) => {
+    try {
+        const session = requireSession(sessionId);
+        const page = getPage(session);
+        const results = [];
+        const resolve = (ref) => {
+            if (ref.startsWith("@e")) {
+                const selector = session.refMap.get(ref);
+                if (!selector)
+                    throw new Error(`Ref ${ref} not found. Take a fresh snapshot.`);
+                return page.locator(selector);
+            }
+            return page.locator(ref);
+        };
+        for (let i = 0; i < actions.length; i++) {
+            const a = actions[i];
+            try {
+                switch (a.action) {
+                    case "click":
+                    case "dblclick":
+                    case "hover": {
+                        if (!a.target)
+                            throw new Error(`'${a.action}' requires a target`);
+                        const loc = resolve(a.target);
+                        if (a.action === "dblclick")
+                            await loc.dblclick();
+                        else if (a.action === "hover")
+                            await loc.hover();
+                        else
+                            await loc.click();
+                        break;
+                    }
+                    case "fill": {
+                        if (!a.target || a.value === undefined)
+                            throw new Error("'fill' requires target and value");
+                        await resolve(a.target).fill(a.value);
+                        break;
+                    }
+                    case "type": {
+                        if (!a.target || a.value === undefined)
+                            throw new Error("'type' requires target and value");
+                        const opts = {};
+                        if (a.typeDelay !== undefined)
+                            opts.delay = a.typeDelay;
+                        await resolve(a.target).pressSequentially(a.value, opts);
+                        break;
+                    }
+                    case "check":
+                    case "uncheck": {
+                        if (!a.target)
+                            throw new Error(`'${a.action}' requires a target`);
+                        if (a.action === "check")
+                            await resolve(a.target).check();
+                        else
+                            await resolve(a.target).uncheck();
+                        break;
+                    }
+                    case "select": {
+                        if (!a.target || a.value === undefined)
+                            throw new Error("'select' requires target and value");
+                        await resolve(a.target).selectOption(a.value);
+                        break;
+                    }
+                    case "press": {
+                        if (!a.key)
+                            throw new Error("'press' requires a key");
+                        await page.keyboard.press(a.key);
+                        break;
+                    }
+                    case "scroll": {
+                        if (a.target) {
+                            await resolve(a.target).scrollIntoViewIfNeeded();
+                        }
+                        else {
+                            const dir = a.scrollDirection ?? "down";
+                            const px = a.scrollAmount ?? 300;
+                            const deltaX = dir === "right" ? px : dir === "left" ? -px : 0;
+                            const deltaY = dir === "down" ? px : dir === "up" ? -px : 0;
+                            await page.mouse.wheel(deltaX, deltaY);
+                        }
+                        break;
+                    }
+                    case "mousemove": {
+                        if (a.x === undefined || a.y === undefined)
+                            throw new Error("'mousemove' requires x and y");
+                        await page.mouse.move(a.x, a.y);
+                        break;
+                    }
+                    case "back":
+                        await page.goBack();
+                        break;
+                    case "forward":
+                        await page.goForward();
+                        break;
+                }
+                results.push(`[${i}] ${a.action}: ok`);
+            }
+            catch (actionErr) {
+                results.push(`[${i}] ${a.action}: FAILED — ${actionErr.message}`);
+                // Stop batch on first failure to avoid cascading errors
+                break;
+            }
+            // Optional delay between actions
+            if (a.delayAfter && a.delayAfter > 0) {
+                await new Promise((r) => setTimeout(r, Math.min(a.delayAfter, 10000)));
+            }
+        }
+        return ok(`Batch complete (${results.length}/${actions.length} actions)\n\n${results.join("\n")}`);
+    }
+    catch (e) {
+        return err(`Batch failed: ${e.message}`);
+    }
+});
 // ─── CLI Flags ─────────────────────────────────────────────────────────────
 async function runDoctor() {
     const checks = [];
@@ -878,8 +1160,10 @@ async function runDoctor() {
     console.log(`  LEAP_MAX_SESSIONS   = ${process.env.LEAP_MAX_SESSIONS ?? "(default: 15)"}`);
     console.log(`  LEAP_IDLE_TIMEOUT   = ${process.env.LEAP_IDLE_TIMEOUT ?? "(default: 300000)"}`);
     console.log(`  LEAP_HEADLESS       = ${process.env.LEAP_HEADLESS ?? "(default: true)"}`);
+    console.log(`  LEAP_CHANNEL        = ${process.env.LEAP_CHANNEL ?? "(default: bundled chromium)"}`);
     console.log(`  LEAP_ALLOW_JS       = ${process.env.LEAP_ALLOW_JS ?? "(default: true)"}`);
     console.log(`  LEAP_STEALTH        = ${process.env.LEAP_STEALTH ?? "(default: true)"}`);
+    console.log(`  LEAP_HUMANIZE       = ${process.env.LEAP_HUMANIZE ?? "(default: false)"}`);
     console.log(`  LEAP_LOG_LEVEL      = ${process.env.LEAP_LOG_LEVEL ?? "(default: info)"}`);
     console.log();
     const failed = checks.some((c) => c.status === "fail");
@@ -901,7 +1185,7 @@ function printConfig() {
     process.exit(0);
 }
 function printVersion() {
-    console.log("0.1.0");
+    console.log(pkg.version);
     process.exit(0);
 }
 // ─── Startup ────────────────────────────────────────────────────────────────

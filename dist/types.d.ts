@@ -77,6 +77,17 @@ export interface SessionCreateOptions {
     acceptDownloads?: boolean;
     /** Enable/disable stealth mode for this session. Default: true (global setting) */
     stealth?: boolean;
+    /** Proxy configuration for this session (passed directly to Playwright browser context) */
+    proxy?: {
+        /** Proxy server URL (e.g. "http://proxy.example.com:8080" or "socks5://proxy.example.com:1080") */
+        server: string;
+        /** Username for proxy authentication */
+        username?: string;
+        /** Password for proxy authentication */
+        password?: string;
+        /** Comma-separated domains to bypass proxy (e.g. "*.example.com,chromium.org") */
+        bypass?: string;
+    };
 }
 export interface ISessionManager {
     createSession(opts?: SessionCreateOptions): Promise<Session>;
@@ -109,6 +120,7 @@ export interface SessionManagerConfig {
         height: number;
     };
     headless: boolean;
+    channel?: string;
 }
 export interface SnapshotNode {
     ref: string;
