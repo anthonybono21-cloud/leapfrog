@@ -774,6 +774,70 @@ server.registerTool(
   },
 );
 
+// ─── diff ──────────────────────────────────────────────────────────────────
+
+server.registerTool(
+  "diff",
+  {
+    title: "Snapshot Diff",
+    description:
+      "Compare the current page state against the last snapshot for this session. " +
+      "Returns only what changed (additions, removals, changes) — massive token savings vs a full re-snapshot. " +
+      "Use after 'act' instead of 'snapshot' when you just need to see what changed. " +
+      "On first call (no previous snapshot), returns the full snapshot with a note. " +
+      "Use 'selector' to scope the diff to a page region.",
+    inputSchema: z.object({
+      sessionId: z.string().describe("Session ID."),
+      selector: z.string().optional().describe("CSS selector to scope snapshot to a page region."),
+    }).strict(),
+  },
+  async ({ sessionId, selector }) => {
+    try {
+      const startTime = Date.now();
+      const session = requireSession(sessionId);
+      const page = getPage(session);
+
+      // Take a fresh snapshot
+      const snapResult = await snapEngine.snapshot(page, session, {
+        interactiveOnly: true,
+        maxChars: MAX_SNAPSHOT_CHARS,
+        selector,
+      });
+
+      // Mark refs as fresh — they match the current nav generation
+      session.refNavGeneration = session.navGeneration ?? 0;
+
+      const url = page.url();
+      let title = "";
+      try { title = await page.title(); } catch { /* */ }
+
+      // Compare against previous snapshot
+      const diff = SnapshotDiffer.diff(session.id, url, snapResult);
+
+      let output: string;
+      if (diff.isFirst) {
+        // No previous snapshot — return the full snapshot with a note
+        output =
+          `[${session.id}] ${title}\n${url}\n${snapResult.nodeCount} elements\n` +
+          `[first snapshot — no previous state to diff against, returning full snapshot]\n\n` +
+          snapResult.text;
+      } else {
+        output =
+          `[${session.id}] ${title}\n${url}\n` +
+          `${diff.diffText}\n` +
+          `[diff: ${diff.diffTokenEstimate} tokens vs full: ${diff.fullTokenEstimate} tokens — ${diff.fullTokenEstimate > 0 ? Math.round((1 - diff.diffTokenEstimate / diff.fullTokenEstimate) * 100) : 0}% saved]`;
+      }
+
+      const duration = Date.now() - startTime;
+      HarnessIntelligence.recordToolCall(sessionId, 'diff', { selector }, `Diff: ${diff.changeCount} changes (first: ${diff.isFirst})`, duration);
+
+      return ok(output);
+    } catch (e: any) {
+      return err(`Diff failed: ${e.message}`);
+    }
+  },
+);
+
 // ─── act ────────────────────────────────────────────────────────────────────
 
 server.registerTool(
@@ -876,7 +940,7 @@ server.registerTool(
             if (holdDuration) {
               // Long-press: mouse down, wait, mouse up
               try {
-                const box = await loc.boundingBox();
+                const box = await loc.boundingBox({ timeout: 5000 });
                 if (!box) {
                   throw new Error(`Element not found or not visible for target '${target}' — cannot perform long-press. Verify the selector or take a fresh snapshot.`);
                 }
@@ -1863,8 +1927,19 @@ server.registerTool(
           rec.value ? `"${rec.value}"` : "",
           `→ ${rec.outcome}`,
           `(${rec.duration}ms)`,
-          rec.url,
         ];
+        // Include tool params so context recovery knows WHAT was done
+        if (rec.toolCall) {
+          const p = rec.toolCall.params;
+          const paramStr = Object.entries(p)
+            .filter(([, v]) => v !== undefined && v !== null && v !== "")
+            .map(([k, v]) => `${k}=${typeof v === "string" && v.length > 60 ? v.slice(0, 60) + "…" : v}`)
+            .join(", ");
+          if (paramStr) parts.push(`{${paramStr}}`);
+          if (rec.toolCall.resultSummary) parts.push(`"${rec.toolCall.resultSummary}"`);
+        } else {
+          if (rec.url) parts.push(rec.url);
+        }
         return parts.filter(Boolean).join(" ");
       });
 
