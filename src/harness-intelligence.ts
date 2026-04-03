@@ -1,5 +1,4 @@
 import { logger } from "./logger.js";
-import { getDomain } from "tldts";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -113,74 +112,6 @@ const ROLE_SUGGESTIONS: Record<string, string> = {
   navigation: "Look for links or buttons inside this navigation region.",
 };
 
-// ─── Bot redirect detection ──────────────────────────────────────────────
-
-/** Known auth provider domains that commonly redirect for login flows */
-const AUTH_DOMAINS = new Set([
-  "google.com",
-  "accounts.google.com",
-  "github.com",
-  "okta.com",
-  "auth0.com",
-  "microsoft.com",
-  "login.microsoftonline.com",
-  "facebook.com",
-  "apple.com",
-  "amazon.com",
-  "signin.aws.amazon.com",
-  "login.yahoo.com",
-  "login.live.com",
-  "sso.godaddy.com",
-  "id.atlassian.com",
-]);
-
-/**
- * Check if a cross-domain redirect looks like bot detection.
- * Compares the eTLD+1 of the requested URL with the final URL.
- * Returns a warning string if suspicious, or null if clean.
- */
-export function checkBotRedirect(requestedUrl: string, finalUrl: string): string | null {
-  // Parse both URLs
-  let requestedHost: string;
-  let finalHost: string;
-  try {
-    requestedHost = new URL(requestedUrl).hostname;
-    finalHost = new URL(finalUrl).hostname;
-  } catch {
-    // Invalid URL — skip check
-    return null;
-  }
-
-  // Same hostname — no redirect
-  if (requestedHost === finalHost) return null;
-
-  // Extract eTLD+1 (e.g., "www.example.com" → "example.com")
-  const requestedDomain = getDomain(requestedUrl);
-  const finalDomain = getDomain(finalUrl);
-
-  // Same eTLD+1 — subdomain redirect, not cross-domain
-  if (requestedDomain === finalDomain) return null;
-  // getDomain returns null for IPs or invalid hostnames
-  if (!requestedDomain || !finalDomain) return null;
-
-  // Check if the final domain is a known auth provider
-  if (AUTH_DOMAINS.has(finalDomain) || AUTH_DOMAINS.has(finalHost)) {
-    return null;
-  }
-
-  // Check if the requested domain is a known auth provider (reverse redirect)
-  if (AUTH_DOMAINS.has(requestedDomain) || AUTH_DOMAINS.has(requestedHost)) {
-    return null;
-  }
-
-  // Cross-domain redirect to unknown domain → potential bot redirect
-  return (
-    `[BOT_REDIRECT] Cross-domain redirect detected. ` +
-    `Requested: ${requestedUrl} → Landed: ${finalUrl}. ` +
-    `The site may have redirected to a bot detection or challenge page. ` +
-    `If this is expected (e.g., SSO login), you can ignore this warning.`
-  );
-}
 
 // ─── State storage ────────────────────────────────────────────────────────
 

@@ -5,9 +5,8 @@ import { z } from "zod";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
-import * as dns from "dns/promises";
-import * as net from "net";
 import { SessionManager } from "./session-manager.js";
+import { checkSSRF } from "./ssrf.js";
 import { SnapshotEngine } from "./snapshot-engine.js";
 import { networkIntelligence } from "./network-intelligence.js";
 import { tabManager } from "./tab-manager.js";
@@ -18,7 +17,7 @@ import { humanMouse } from "./humanize-mouse.js";
 import { humanTyping } from "./humanize-typing.js";
 import { humanScroll } from "./humanize-scroll.js";
 import { thinkPause } from "./humanize-pause.js";
-import { isHumanizeEnabled } from "./humanize-utils.js";
+import { isHumanizeEnabled, gaussianClickOffset } from "./humanize-utils.js";
 import { ScriptExecutor } from "./script-executor.js";
 import { SnapshotDiffer } from "./snapshot-differ.js";
 import { ApiIntelligence } from "./api-intelligence.js";
@@ -91,125 +90,7 @@ async function snapAndFormat(session, opts) {
 }
 const PROFILE_DIR = path.join(os.homedir(), ".leapfrog", "profiles");
 // ─── SSRF Protection ───────────────────────────────────────────────────────
-const BLOCKED_IP_RANGES = [
-    /^127\./, /^10\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./,
-    /^169\.254\./, /^0\./, /^::1$/, /^fc00:/, /^fe80:/, /^fd/,
-    /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, // P0-2: CGNAT range 100.64.0.0/10
-    /^198\.1[89]\./, // P0-2: Benchmarking range 198.18.0.0/15
-];
-const BLOCKED_HOSTNAMES = new Set([
-    'localhost',
-    'localhost.localdomain',
-    'ip6-localhost',
-    'ip6-loopback',
-]);
-function isInternalIP(ip) {
-    return BLOCKED_IP_RANGES.some((r) => r.test(ip));
-}
-/**
- * Parse octal IP notation like 0177.0.0.1 → 127.0.0.1
- * Returns null if not a valid octal IP.
- */
-function parseOctalIP(hostname) {
-    const parts = hostname.split('.');
-    if (parts.length !== 4)
-        return null;
-    const nums = [];
-    for (const part of parts) {
-        if (!/^0?\d+$/.test(part))
-            return null;
-        const n = part.startsWith('0') && part.length > 1 ? parseInt(part, 8) : parseInt(part, 10);
-        if (isNaN(n) || n < 0 || n > 255)
-            return null;
-        nums.push(n);
-    }
-    return nums.join('.');
-}
-/**
- * P0-2: Parse hex IP notation like 0x7f000001 → 127.0.0.1
- * Returns null if not a valid hex IP.
- */
-function parseHexIP(hostname) {
-    if (!/^0x[0-9a-fA-F]+$/.test(hostname))
-        return null;
-    const num = parseInt(hostname, 16);
-    if (isNaN(num) || num < 0 || num > 0xFFFFFFFF)
-        return null;
-    return [
-        (num >>> 24) & 0xFF,
-        (num >>> 16) & 0xFF,
-        (num >>> 8) & 0xFF,
-        num & 0xFF,
-    ].join('.');
-}
-/**
- * Parse decimal IP notation like 2130706433 → 127.0.0.1
- * Returns null if not a valid decimal IP.
- */
-function parseDecimalIP(hostname) {
-    if (!/^\d+$/.test(hostname))
-        return null;
-    const num = parseInt(hostname, 10);
-    if (isNaN(num) || num < 0 || num > 0xFFFFFFFF)
-        return null;
-    return [
-        (num >>> 24) & 0xFF,
-        (num >>> 16) & 0xFF,
-        (num >>> 8) & 0xFF,
-        num & 0xFF,
-    ].join('.');
-}
-async function checkSSRF(hostname) {
-    // Blocked hostname check (localhost etc.)
-    if (BLOCKED_HOSTNAMES.has(hostname.toLowerCase())) {
-        return `Blocked: ${hostname} is a reserved hostname.`;
-    }
-    // IPv6 bracket notation: [::1] → ::1
-    let normalizedHost = hostname;
-    if (normalizedHost.startsWith('[') && normalizedHost.endsWith(']')) {
-        normalizedHost = normalizedHost.slice(1, -1);
-    }
-    // Direct IP check
-    if (net.isIP(normalizedHost)) {
-        if (isInternalIP(normalizedHost))
-            return `Blocked: ${hostname} is an internal IP address.`;
-        return null;
-    }
-    // P0-2: Hex IP notation: 0x7f000001 → 127.0.0.1
-    const hexResolved = parseHexIP(normalizedHost);
-    if (hexResolved) {
-        if (isInternalIP(hexResolved))
-            return `Blocked: ${hostname} resolves to internal IP ${hexResolved} (hex notation).`;
-        return null;
-    }
-    // Octal IP notation: 0177.0.0.1 → 127.0.0.1
-    const octalResolved = parseOctalIP(normalizedHost);
-    if (octalResolved) {
-        if (isInternalIP(octalResolved))
-            return `Blocked: ${hostname} resolves to internal IP ${octalResolved} (octal notation).`;
-        return null;
-    }
-    // Decimal IP notation: 2130706433 → 127.0.0.1
-    const decimalResolved = parseDecimalIP(normalizedHost);
-    if (decimalResolved) {
-        if (isInternalIP(decimalResolved))
-            return `Blocked: ${hostname} resolves to internal IP ${decimalResolved} (decimal notation).`;
-        return null;
-    }
-    // DNS resolution check (catches DNS rebinding)
-    try {
-        const addresses = await dns.resolve4(normalizedHost);
-        for (const addr of addresses) {
-            if (isInternalIP(addr)) {
-                return `Blocked: ${hostname} resolves to internal IP ${addr}.`;
-            }
-        }
-    }
-    catch {
-        // DNS failure — let the browser handle it (will show its own error)
-    }
-    return null;
-}
+// Moved to src/ssrf.ts — imported as { checkSSRF, checkSSRFSync }
 // ─── Server ─────────────────────────────────────────────────────────────────
 const server = new McpServer({ name: "leapfrog", version: pkg.version }, { capabilities: { tools: {} } });
 // ─── session_create ─────────────────────────────────────────────────────────
@@ -513,6 +394,7 @@ server.registerTool("navigate", {
         // Bump nav generation — any refs from before this navigation are now stale
         // (navGeneration check in act handler prevents using stale refs)
         // Don't clear refMap — historical refs needed for session_export resolution
+        session.staleRefThreshold = session.refCounter; // refs with numbers <= this are from a previous page
         session.navGeneration = (session.navGeneration ?? 0) + 1;
         // Reset API captures for the new page
         ApiIntelligence.clearSession(sessionId);
@@ -756,8 +638,19 @@ server.registerTool("act", {
         // Resolve target to a Playwright locator (with stale-ref detection)
         const resolve = (ref) => {
             if (ref.startsWith("@e")) {
+                // Generation-level guard: catches if navigate happened with no subsequent snapshot
                 if ((session.navGeneration ?? 0) > (session.refNavGeneration ?? 0)) {
                     throw new Error(`Ref ${ref} is stale — the page has navigated since the last snapshot. Take a new snapshot to get updated refs.`);
+                }
+                // Per-ref guard: catches refs from a previous page even when navigate auto-snapshots.
+                // staleRefThreshold records the refCounter at the time of the last navigation.
+                // Refs with numbers <= threshold were created on a prior page and may resolve
+                // to wrong elements on the current page.
+                if (session.staleRefThreshold != null) {
+                    const refNum = parseInt(ref.slice(2), 10);
+                    if (!isNaN(refNum) && refNum <= session.staleRefThreshold) {
+                        throw new Error(`Stale ref ${ref} from previous page. Take a fresh snapshot.`);
+                    }
                 }
                 const selector = session.refMap.get(ref);
                 if (!selector)
@@ -782,7 +675,9 @@ server.registerTool("act", {
                             if (!box) {
                                 throw new Error(`Element not found or not visible for target '${target}' — cannot perform long-press. Verify the selector or take a fresh snapshot.`);
                             }
-                            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+                            const lpX = gaussianClickOffset(box.x + box.width / 2, box.width, box.x);
+                            const lpY = gaussianClickOffset(box.y + box.height / 2, box.height, box.y);
+                            await page.mouse.move(lpX, lpY);
                             await page.mouse.down();
                             await page.waitForTimeout(holdDuration);
                             await page.mouse.up();
@@ -795,8 +690,8 @@ server.registerTool("act", {
                         // Humanized click: Bezier move to target center, dwell, then click
                         const box = await loc.boundingBox();
                         if (box) {
-                            const cx = box.x + box.width / 2;
-                            const cy = box.y + box.height / 2;
+                            const cx = gaussianClickOffset(box.x + box.width / 2, box.width, box.x);
+                            const cy = gaussianClickOffset(box.y + box.height / 2, box.height, box.y);
                             await humanMouse.humanClick(page, cx, cy);
                         }
                         else {
@@ -804,7 +699,16 @@ server.registerTool("act", {
                         }
                     }
                     else {
-                        await loc.click();
+                        // Non-humanized click: still apply Gaussian offset to avoid dead-center bot fingerprint
+                        const box = await loc.boundingBox();
+                        if (box) {
+                            const cx = gaussianClickOffset(box.x + box.width / 2, box.width, box.x);
+                            const cy = gaussianClickOffset(box.y + box.height / 2, box.height, box.y);
+                            await page.mouse.click(cx, cy);
+                        }
+                        else {
+                            await loc.click();
+                        }
                     }
                 }
                 else if (action === "dblclick") {
@@ -817,8 +721,8 @@ server.registerTool("act", {
                     if (isHumanizeEnabled()) {
                         const box = await loc.boundingBox();
                         if (box) {
-                            const cx = box.x + box.width / 2;
-                            const cy = box.y + box.height / 2;
+                            const cx = gaussianClickOffset(box.x + box.width / 2, box.width, box.x);
+                            const cy = gaussianClickOffset(box.y + box.height / 2, box.height, box.y);
                             await humanMouse.moveTo(page, cx, cy);
                         }
                         else {
@@ -826,7 +730,15 @@ server.registerTool("act", {
                         }
                     }
                     else {
-                        await loc.hover();
+                        const box = await loc.boundingBox();
+                        if (box) {
+                            const cx = gaussianClickOffset(box.x + box.width / 2, box.width, box.x);
+                            const cy = gaussianClickOffset(box.y + box.height / 2, box.height, box.y);
+                            await page.mouse.move(cx, cy);
+                        }
+                        else {
+                            await loc.hover();
+                        }
                     }
                 }
                 break;
@@ -1045,6 +957,12 @@ server.registerTool("extract", {
             if (ref.startsWith("@e")) {
                 if ((session.navGeneration ?? 0) > (session.refNavGeneration ?? 0)) {
                     throw new Error(`Ref ${ref} is stale — the page has navigated since the last snapshot. Take a new snapshot to get updated refs.`);
+                }
+                if (session.staleRefThreshold != null) {
+                    const refNum = parseInt(ref.slice(2), 10);
+                    if (!isNaN(refNum) && refNum <= session.staleRefThreshold) {
+                        throw new Error(`Stale ref ${ref} from previous page. Take a fresh snapshot.`);
+                    }
                 }
                 const sel = session.refMap.get(ref);
                 if (!sel)
@@ -1438,6 +1356,12 @@ server.registerTool("batch_actions", {
                 if ((session.navGeneration ?? 0) > (session.refNavGeneration ?? 0)) {
                     throw new Error(`Ref ${ref} is stale — the page has navigated since the last snapshot. Take a new snapshot to get updated refs.`);
                 }
+                if (session.staleRefThreshold != null) {
+                    const refNum = parseInt(ref.slice(2), 10);
+                    if (!isNaN(refNum) && refNum <= session.staleRefThreshold) {
+                        throw new Error(`Stale ref ${ref} from previous page. Take a fresh snapshot.`);
+                    }
+                }
                 const selector = session.refMap.get(ref);
                 if (!selector)
                     throw new Error(`Ref ${ref} not found. Take a fresh snapshot.`);
@@ -1790,6 +1714,24 @@ server.registerTool("paginate", {
     }).strict(),
 }, async ({ sessionId, extractType, extractTarget, extractJs, nextSelector, paginationType, urlPattern, maxPages, delayMs, maxCharsPerPage, stopWhen }) => {
     try {
+        // SSRF check: validate urlPattern before pagination navigates to it
+        if (paginationType === "url" && urlPattern) {
+            const sampleUrl = urlPattern.replace(/\{page\}/g, "1");
+            try {
+                const parsed = new URL(sampleUrl);
+                if (!["http:", "https:"].includes(parsed.protocol)) {
+                    return err(`Blocked URL scheme in urlPattern: ${parsed.protocol} — only http/https allowed.`);
+                }
+                const ssrfBlock = await checkSSRF(parsed.hostname);
+                if (ssrfBlock) {
+                    logger.warn("security.ssrf_paginate_blocked", { urlPattern, hostname: parsed.hostname });
+                    return err(ssrfBlock);
+                }
+            }
+            catch {
+                return err(`Invalid URL in urlPattern: ${sampleUrl}`);
+            }
+        }
         const session = requireSession(sessionId);
         const page = getPage(session);
         const result = await paginate(page, session, {

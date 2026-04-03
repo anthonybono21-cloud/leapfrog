@@ -63,6 +63,8 @@ export interface Session {
   navGeneration?: number;
   /** The navGeneration value at the time of the last snapshot. Refs are stale when navGeneration > refNavGeneration. */
   refNavGeneration?: number;
+  /** The refCounter value at the time of the last navigation. Refs with numbers <= this threshold are from a previous page. */
+  staleRefThreshold?: number;
 }
 
 export interface SessionCreateOptions {

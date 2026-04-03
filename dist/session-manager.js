@@ -7,6 +7,7 @@ import { logger } from "./logger.js";
 import { generateFingerprint } from "./humanize-fingerprint.js";
 import { isHumanizeEnabled } from "./humanize-utils.js";
 import { CdpConnector } from "./cdp-connector.js";
+import { installSSRFRouteGuard } from "./ssrf.js";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
@@ -396,6 +397,10 @@ export class SessionManager {
         Object.defineProperty(window, 'devicePixelRatio', { get: () => ${fp.devicePixelRatio} });
       })();`);
         }
+        // SSRF route guard — intercept ALL requests and block those targeting internal
+        // IPs / reserved hostnames. Catches redirect chains (302 -> internal) BEFORE
+        // the browser follows them, closing the TOCTOU gap in the post-nav check.
+        await installSSRFRouteGuard(page);
         // Auto-dismiss browser dialogs (alert, confirm, prompt) to prevent session hangs
         // P1 #6: Add 200-500ms random delay — instant dismiss (< 30ms) is a headless signal
         page.on("dialog", (dialog) => {
@@ -425,6 +430,8 @@ export class SessionManager {
                         if (stealth.isEnabled()) {
                             stealth.applyToPage(newPage).catch(() => { });
                         }
+                        // Re-install SSRF route guard on replacement page
+                        installSSRFRouteGuard(newPage).catch(() => { });
                         // Re-wire network intelligence
                         networkIntelligence.attachToPage(newPage, s);
                         // Auto-dismiss dialogs on replacement page

@@ -79,6 +79,26 @@ export function normalRandom(mean: number, stddev: number): number {
 }
 
 /**
+ * Compute a Gaussian-distributed click offset within an element's bounding box.
+ *
+ * Real humans click in a Gaussian distribution around the center of a target
+ * element, NOT at the exact geometric center. Dead-center clicks are a known
+ * bot detection fingerprint (DataDome, PerimeterX track this pattern).
+ *
+ * @param center      - The geometric center of the element on this axis
+ * @param elementSize - The element's width or height on this axis
+ * @param elementStart - The element's x or y origin on this axis
+ * @returns A coordinate within the element bounds, Gaussian-distributed around center
+ */
+export function gaussianClickOffset(center: number, elementSize: number, elementStart: number): number {
+  const sigma = elementSize * 0.15;
+  const offset = gaussianRandom(center, sigma);
+  // Clamp within element bounds with a 5% inset margin on each side
+  const margin = elementSize * 0.05;
+  return clamp(offset, elementStart + margin, elementStart + elementSize - margin);
+}
+
+/**
  * Check whether the LEAP_HUMANIZE env var is enabled.
  * Returns false unless LEAP_HUMANIZE is explicitly set to "true" or "1".
  */

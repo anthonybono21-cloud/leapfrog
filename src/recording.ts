@@ -8,6 +8,7 @@
 
 import { HarnessIntelligence } from "./harness-intelligence.js";
 import { logger } from "./logger.js";
+import { checkSSRF } from "./ssrf.js";
 import type { Session } from "./types.js";
 import type { Page } from "playwright-core";
 
@@ -802,6 +803,23 @@ async function executeStep(
     case "navigate": {
       const url = args.url as string;
       if (!url) throw new Error("navigate step missing url");
+
+      // SSRF check: validate navigate URL before replay
+      try {
+        const parsed = new URL(url);
+        if (!["http:", "https:"].includes(parsed.protocol)) {
+          throw new Error(`Blocked URL scheme during replay: ${parsed.protocol} — only http/https allowed.`);
+        }
+        const ssrfBlock = await checkSSRF(parsed.hostname);
+        if (ssrfBlock) {
+          logger.warn("security.ssrf_replay_blocked", { url, hostname: parsed.hostname });
+          throw new Error(ssrfBlock);
+        }
+      } catch (e: any) {
+        if (e.message.startsWith("Blocked")) throw e;
+        throw new Error(`Invalid URL in replay navigate step: ${url}`);
+      }
+
       const waitUntil = (args.waitUntil as "load" | "domcontentloaded" | "networkidle") ?? "load";
       await page.goto(url, { waitUntil });
       break;

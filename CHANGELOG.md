@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-04-03
+
+### Security
+
+- **P0: SSRF — IPv4-mapped IPv6 bypass** — `[::ffff:127.0.0.1]` and `[::ffff:10.0.0.1]` now correctly blocked. New `extractIPv4FromMappedIPv6()` handles both dotted (`::ffff:127.0.0.1`) and hex-normalized (`::ffff:7f00:1`) forms.
+- **P0: SSRF — Redirect chain interception** — `page.route('**/*')` guard installed on every page blocks direct requests to internal IPs. Post-navigation check catches 302 redirect chains as defense-in-depth.
+- **P1: SSRF — `.internal` TLD blocked** — `metadata.google.internal`, `kubernetes.default.svc`, and `kubernetes.default.svc.cluster.local` now blocked. All `.internal` TLD hostnames rejected.
+- **SSRF scope expanded** — `checkSSRF()` now protects `paginate` (URL-pattern pagination) and `session_replay` (recorded navigate steps), not just the `navigate` tool.
+- **SSRF module extracted** — New `src/ssrf.ts` centralizes all SSRF protection (IP ranges, hostnames, TLDs, encoding parsers, route guard) for consistent enforcement across all tools.
+
+### Bug Fixes
+
+- **P1: Click offset randomization** — All click paths (normal, humanized, holdDuration, hover) now use Gaussian offset (sigma=15% of element dimension, 5% inset margin) instead of dead-center coordinates. Eliminates a known bot detection fingerprint.
+- **P1: Stale @eN ref guard** — Refs from a previous page now throw `"Stale ref @eN from previous page. Take a fresh snapshot."` instead of silently resolving to wrong elements. Uses `staleRefThreshold` to track which refs belong to which page without breaking export resolution.
+
+### Cleanup
+
+- Removed dead `checkBotRedirect()` export from harness-intelligence
+- Removed unused `toPlaywrightScript` import from index
+- Fixed package description: 27 → 31 tools
+- Fixed server.json version and description
+
+### Testing
+
+- **537 unit tests** across 20 suites (up from 442/19)
+- New `ssrf.test.ts` — 95 tests covering IPv4, IPv6, mapped IPv6, blocked hostnames, TLDs, octal/hex/decimal encodings, edge cases, and async DNS path. Tests import the real `checkSSRFSync()`/`checkSSRF()` functions (not replicated logic).
+
+---
+
 ## [0.5.1] - 2026-04-03
 
 ### Bug Fixes
