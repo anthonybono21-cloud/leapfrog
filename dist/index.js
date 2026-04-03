@@ -19,6 +19,15 @@ import { humanTyping } from "./humanize-typing.js";
 import { humanScroll } from "./humanize-scroll.js";
 import { thinkPause } from "./humanize-pause.js";
 import { isHumanizeEnabled } from "./humanize-utils.js";
+import { ScriptExecutor } from "./script-executor.js";
+import { SnapshotDiffer } from "./snapshot-differ.js";
+import { ApiIntelligence } from "./api-intelligence.js";
+import { PageClassifier } from "./page-classifier.js";
+import { HarnessIntelligence, formatHarnessOutput } from "./harness-intelligence.js";
+import { adaptiveNavigate, formatAdaptiveResult } from "./adaptive-wait.js";
+import { runStealthAudit } from "./stealth-audit.js";
+import { exportSession, replayRecording } from "./recording.js";
+import { paginate } from "./paginate.js";
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json");
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -33,6 +42,8 @@ const HEADLESS = process.env.LEAP_HEADLESS !== "false";
 const CHANNEL = process.env.LEAP_CHANNEL || undefined; // "chrome" to use installed Chrome
 const MAX_SNAPSHOT_CHARS = 10000;
 const ALLOW_JS = process.env.LEAP_ALLOW_JS !== "false";
+const ALLOW_EXECUTE = process.env.LEAP_ALLOW_EXECUTE !== "false";
+const LEAP_PROFILES_DIR = process.env.LEAP_PROFILES_DIR ?? path.join(os.homedir(), ".leapfrog", "chrome-profiles");
 const sessions = new SessionManager({
     maxSessions: MAX_SESSIONS,
     idleTimeoutMs: IDLE_TIMEOUT_MS,
@@ -40,6 +51,10 @@ const sessions = new SessionManager({
     channel: CHANNEL,
 });
 const snapEngine = new SnapshotEngine();
+// Hook API intelligence into network response listener
+networkIntelligence.onResponse((session, url, method, status, headers, body, duration, resourceType, requestHeaders, requestBody) => {
+    ApiIntelligence.capture(session, url, method, status, headers, body, duration, resourceType, requestHeaders, requestBody);
+});
 // ─── Helpers ────────────────────────────────────────────────────────────────
 function ok(text) {
     return { content: [{ type: "text", text }] };
@@ -64,6 +79,8 @@ async function snapAndFormat(session, opts) {
         maxChars: opts?.maxChars ?? MAX_SNAPSHOT_CHARS,
         selector: opts?.selector,
     });
+    // Mark refs as fresh — they match the current nav generation
+    session.refNavGeneration = session.navGeneration ?? 0;
     const url = page.url();
     let title = "";
     try {
@@ -77,20 +94,111 @@ const PROFILE_DIR = path.join(os.homedir(), ".leapfrog", "profiles");
 const BLOCKED_IP_RANGES = [
     /^127\./, /^10\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./,
     /^169\.254\./, /^0\./, /^::1$/, /^fc00:/, /^fe80:/, /^fd/,
+    /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, // P0-2: CGNAT range 100.64.0.0/10
+    /^198\.1[89]\./, // P0-2: Benchmarking range 198.18.0.0/15
 ];
+const BLOCKED_HOSTNAMES = new Set([
+    'localhost',
+    'localhost.localdomain',
+    'ip6-localhost',
+    'ip6-loopback',
+]);
 function isInternalIP(ip) {
     return BLOCKED_IP_RANGES.some((r) => r.test(ip));
 }
+/**
+ * Parse octal IP notation like 0177.0.0.1 → 127.0.0.1
+ * Returns null if not a valid octal IP.
+ */
+function parseOctalIP(hostname) {
+    const parts = hostname.split('.');
+    if (parts.length !== 4)
+        return null;
+    const nums = [];
+    for (const part of parts) {
+        if (!/^0?\d+$/.test(part))
+            return null;
+        const n = part.startsWith('0') && part.length > 1 ? parseInt(part, 8) : parseInt(part, 10);
+        if (isNaN(n) || n < 0 || n > 255)
+            return null;
+        nums.push(n);
+    }
+    return nums.join('.');
+}
+/**
+ * P0-2: Parse hex IP notation like 0x7f000001 → 127.0.0.1
+ * Returns null if not a valid hex IP.
+ */
+function parseHexIP(hostname) {
+    if (!/^0x[0-9a-fA-F]+$/.test(hostname))
+        return null;
+    const num = parseInt(hostname, 16);
+    if (isNaN(num) || num < 0 || num > 0xFFFFFFFF)
+        return null;
+    return [
+        (num >>> 24) & 0xFF,
+        (num >>> 16) & 0xFF,
+        (num >>> 8) & 0xFF,
+        num & 0xFF,
+    ].join('.');
+}
+/**
+ * Parse decimal IP notation like 2130706433 → 127.0.0.1
+ * Returns null if not a valid decimal IP.
+ */
+function parseDecimalIP(hostname) {
+    if (!/^\d+$/.test(hostname))
+        return null;
+    const num = parseInt(hostname, 10);
+    if (isNaN(num) || num < 0 || num > 0xFFFFFFFF)
+        return null;
+    return [
+        (num >>> 24) & 0xFF,
+        (num >>> 16) & 0xFF,
+        (num >>> 8) & 0xFF,
+        num & 0xFF,
+    ].join('.');
+}
 async function checkSSRF(hostname) {
+    // Blocked hostname check (localhost etc.)
+    if (BLOCKED_HOSTNAMES.has(hostname.toLowerCase())) {
+        return `Blocked: ${hostname} is a reserved hostname.`;
+    }
+    // IPv6 bracket notation: [::1] → ::1
+    let normalizedHost = hostname;
+    if (normalizedHost.startsWith('[') && normalizedHost.endsWith(']')) {
+        normalizedHost = normalizedHost.slice(1, -1);
+    }
     // Direct IP check
-    if (net.isIP(hostname)) {
-        if (isInternalIP(hostname))
+    if (net.isIP(normalizedHost)) {
+        if (isInternalIP(normalizedHost))
             return `Blocked: ${hostname} is an internal IP address.`;
+        return null;
+    }
+    // P0-2: Hex IP notation: 0x7f000001 → 127.0.0.1
+    const hexResolved = parseHexIP(normalizedHost);
+    if (hexResolved) {
+        if (isInternalIP(hexResolved))
+            return `Blocked: ${hostname} resolves to internal IP ${hexResolved} (hex notation).`;
+        return null;
+    }
+    // Octal IP notation: 0177.0.0.1 → 127.0.0.1
+    const octalResolved = parseOctalIP(normalizedHost);
+    if (octalResolved) {
+        if (isInternalIP(octalResolved))
+            return `Blocked: ${hostname} resolves to internal IP ${octalResolved} (octal notation).`;
+        return null;
+    }
+    // Decimal IP notation: 2130706433 → 127.0.0.1
+    const decimalResolved = parseDecimalIP(normalizedHost);
+    if (decimalResolved) {
+        if (isInternalIP(decimalResolved))
+            return `Blocked: ${hostname} resolves to internal IP ${decimalResolved} (decimal notation).`;
         return null;
     }
     // DNS resolution check (catches DNS rebinding)
     try {
-        const addresses = await dns.resolve4(hostname);
+        const addresses = await dns.resolve4(normalizedHost);
         for (const addr of addresses) {
             if (isInternalIP(addr)) {
                 return `Blocked: ${hostname} resolves to internal IP ${addr}.`;
@@ -110,7 +218,8 @@ server.registerTool("session_create", {
     description: "Create a new isolated browser session with its own cookies and state. " +
         "Returns a short session ID (e.g. s_k3m7x1) to pass to all other tools. " +
         "Each session is a separate BrowserContext — no cookie leakage between sessions. " +
-        `Pool limit: ${MAX_SESSIONS} concurrent sessions.`,
+        `Pool limit: ${MAX_SESSIONS} concurrent sessions. ` +
+        "Sessions auto-expire after 30 minutes of inactivity. Use keep-alive pattern (periodic navigate or snapshot) for long-running sessions.",
     inputSchema: z.object({
         profilePath: z
             .string()
@@ -156,8 +265,28 @@ server.registerTool("session_create", {
         })
             .optional()
             .describe("Per-session proxy configuration. Each session can use a different proxy."),
-    }),
-}, async ({ profilePath, viewport, userAgent, locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth, proxy }) => {
+        profile: z
+            .string()
+            .optional()
+            .describe("Profile shorthand name (e.g. 'github', 'gmail'). Uses persistent Chrome profile at ~/.leapfrog/chrome-profiles/{name}/."),
+        headed: z
+            .boolean()
+            .optional()
+            .describe("Run browser with visible UI for this session. Overrides LEAP_HEADED env var."),
+        extensions: z
+            .array(z.string())
+            .optional()
+            .describe("Paths to unpacked Chrome extensions to load."),
+        cdp: z
+            .string()
+            .optional()
+            .describe("CDP endpoint URL to connect to a running Chrome instance (e.g. 'http://localhost:9222')."),
+        clientId: z
+            .string()
+            .optional()
+            .describe("Client identifier for per-client pool partitioning. Used with LEAP_MAX_SESSIONS_PER_CLIENT."),
+    }).strict(),
+}, async ({ profilePath, viewport, userAgent, locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth, proxy, profile, headed, extensions, cdp, clientId }) => {
     try {
         // Validate profilePath stays within the profiles directory
         if (profilePath) {
@@ -175,6 +304,7 @@ server.registerTool("session_create", {
         const session = await sessions.createSession({
             profilePath, viewport, userAgent,
             locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth, proxy,
+            profile, headed, extensions, cdp, clientId,
         });
         const stats = sessions.getStats();
         return ok(`Session created: ${session.id}\n` +
@@ -188,7 +318,7 @@ server.registerTool("session_create", {
 server.registerTool("session_list", {
     title: "List Browser Sessions",
     description: "List all active browser sessions with their URLs and idle times.",
-    inputSchema: z.object({}),
+    inputSchema: z.object({}).strict(),
 }, async () => {
     const list = sessions.listSessions();
     const stats = sessions.getStats();
@@ -209,8 +339,12 @@ server.registerTool("session_destroy", {
     description: "Close and clean up a browser session. Frees a pool slot.",
     inputSchema: z.object({
         sessionId: z.string().describe("Session ID to destroy."),
-    }),
+    }).strict(),
 }, async ({ sessionId }) => {
+    // Clean up module-level state for the session
+    SnapshotDiffer.clearSession(sessionId);
+    ApiIntelligence.clearSession(sessionId);
+    HarnessIntelligence.clearSession(sessionId);
     await sessions.destroySession(sessionId);
     const stats = sessions.getStats();
     return ok(`Destroyed ${sessionId}. Pool: ${stats.active}/${stats.maxSessions}`);
@@ -224,7 +358,7 @@ server.registerTool("session_save_profile", {
     inputSchema: z.object({
         sessionId: z.string().describe("Session ID to save."),
         name: z.string().describe("Profile name (e.g. 'google', 'github'). Overwrites if exists."),
-    }),
+    }).strict(),
 }, async ({ sessionId, name }) => {
     try {
         // Sanitize profile name — alphanumeric, dash, underscore only
@@ -249,7 +383,7 @@ server.registerTool("session_save_profile", {
 server.registerTool("session_list_profiles", {
     title: "List Saved Profiles",
     description: "List all saved authentication profiles.",
-    inputSchema: z.object({}),
+    inputSchema: z.object({}).strict(),
 }, async () => {
     try {
         await fs.mkdir(PROFILE_DIR, { recursive: true });
@@ -267,6 +401,68 @@ server.registerTool("session_list_profiles", {
         return err(`List failed: ${e.message}`);
     }
 });
+// ─── Auto-Challenge Solver ──────────────────────────────────────────────────
+const CHALLENGE_BUTTON_PATTERNS = /^(continue|continue shopping|i'm not a robot|accept|verify|i am human|submit|proceed)$/i;
+async function attemptChallengeResolve(page, session, confidence) {
+    try {
+        // Strategy 1: Look for a single primary button with challenge-related text
+        const buttons = await page.locator('button, [role="button"], input[type="submit"]').all();
+        for (const btn of buttons) {
+            try {
+                const text = (await btn.textContent())?.trim() ?? "";
+                const value = (await btn.getAttribute("value"))?.trim() ?? "";
+                if (CHALLENGE_BUTTON_PATTERNS.test(text) || CHALLENGE_BUTTON_PATTERNS.test(value)) {
+                    await btn.click();
+                    await page.waitForTimeout(1000);
+                    // Re-snapshot to check if challenge resolved
+                    const reSnap = await snapEngine.snapshot(page, session, { interactiveOnly: true, maxChars: MAX_SNAPSHOT_CHARS });
+                    session.refNavGeneration = session.navGeneration ?? 0;
+                    const url = page.url();
+                    let title = "";
+                    try {
+                        title = await page.title();
+                    }
+                    catch { /* */ }
+                    const reClass = PageClassifier.classify({ url, snapshotText: reSnap.text });
+                    if (reClass.type !== 'challenge') {
+                        return `[CHALLENGE RESOLVED] Auto-clicked challenge button. Page is now accessible.\n\n[${session.id}] ${title}\n${url}\n${reSnap.nodeCount} elements\n\n${reSnap.text}\n\n[page: ${reClass.type} (${Math.round(reClass.confidence * 100)}%)]`;
+                    }
+                    // Still a challenge after clicking
+                    return `[CHALLENGE] Bot challenge detected (${Math.round(confidence * 100)}%). Auto-clicked button but challenge persists. Manual intervention may be required.\n\n[${session.id}] ${title}\n${url}\n${reSnap.nodeCount} elements\n\n${reSnap.text}`;
+                }
+            }
+            catch { /* skip individual button errors */ }
+        }
+        // Strategy 2: Look for a checkbox
+        const checkbox = page.locator('input[type="checkbox"]').first();
+        try {
+            if (await checkbox.isVisible({ timeout: 500 })) {
+                await checkbox.click();
+                await page.waitForTimeout(1000);
+                const reSnap = await snapEngine.snapshot(page, session, { interactiveOnly: true, maxChars: MAX_SNAPSHOT_CHARS });
+                session.refNavGeneration = session.navGeneration ?? 0;
+                const url = page.url();
+                let title = "";
+                try {
+                    title = await page.title();
+                }
+                catch { /* */ }
+                const reClass = PageClassifier.classify({ url, snapshotText: reSnap.text });
+                if (reClass.type !== 'challenge') {
+                    return `[CHALLENGE RESOLVED] Auto-clicked challenge checkbox. Page is now accessible.\n\n[${session.id}] ${title}\n${url}\n${reSnap.nodeCount} elements\n\n${reSnap.text}\n\n[page: ${reClass.type} (${Math.round(reClass.confidence * 100)}%)]`;
+                }
+                return `[CHALLENGE] Bot challenge detected (${Math.round(confidence * 100)}%). Auto-clicked checkbox but challenge persists. Manual intervention may be required.\n\n[${session.id}] ${title}\n${url}\n${reSnap.nodeCount} elements\n\n${reSnap.text}`;
+            }
+        }
+        catch { /* checkbox not found or not visible */ }
+        // Strategy 3: No simple action found
+        // Return null to let the caller output the normal page with classification
+        return null;
+    }
+    catch {
+        return null;
+    }
+}
 // ─── navigate ───────────────────────────────────────────────────────────────
 server.registerTool("navigate", {
     title: "Navigate & Snapshot",
@@ -280,8 +476,19 @@ server.registerTool("navigate", {
             .enum(["load", "domcontentloaded", "networkidle"])
             .default("load")
             .describe("Wait strategy. Use networkidle for SPAs."),
-    }),
-}, async ({ sessionId, url, waitUntil }) => {
+        autoRetry: z
+            .boolean()
+            .default(true)
+            .describe("Auto-retry with stealth escalation when blocked. Default: true."),
+        maxRetryLevel: z
+            .number()
+            .int()
+            .min(0)
+            .max(5)
+            .default(3)
+            .describe("Max escalation level (0-5). Level 3+ rotates session. Default: 3."),
+    }).strict(),
+}, async ({ sessionId, url, waitUntil, autoRetry, maxRetryLevel }) => {
     try {
         // Block dangerous URL schemes
         let parsed;
@@ -300,10 +507,49 @@ server.registerTool("navigate", {
             logger.warn("security.ssrf_blocked", { url, hostname: parsed.hostname });
             return err(ssrfBlock);
         }
+        const startTime = Date.now();
         const session = requireSession(sessionId);
-        await getPage(session).goto(url, { waitUntil });
-        const text = await snapAndFormat(session);
-        return ok(text);
+        const page = getPage(session);
+        // Bump nav generation — any refs from before this navigation are now stale
+        // (navGeneration check in act handler prevents using stale refs)
+        // Don't clear refMap — historical refs needed for session_export resolution
+        session.navGeneration = (session.navGeneration ?? 0) + 1;
+        // Reset API captures for the new page
+        ApiIntelligence.clearSession(sessionId);
+        // Adaptive navigate with wait strategy selection + stealth escalation
+        const result = await adaptiveNavigate(page, session, url, sessions, {
+            waitUntil,
+            autoRetry,
+            maxRetryLevel,
+        });
+        // P0-2: Post-navigation SSRF check — catch 302 redirects to internal IPs
+        try {
+            const finalParsed = new URL(result.url);
+            if (finalParsed.hostname !== parsed.hostname) {
+                const redirectBlock = await checkSSRF(finalParsed.hostname);
+                if (redirectBlock) {
+                    logger.warn("security.ssrf_redirect_blocked", { url, finalUrl: result.url, hostname: finalParsed.hostname });
+                    await result.page.goto("about:blank");
+                    return err(`Redirect blocked: ${url} redirected to ${result.url} — ${redirectBlock}`);
+                }
+            }
+        }
+        catch { /* final URL parse error is non-fatal */ }
+        // Update ref nav generation on the final session
+        result.session.refNavGeneration = result.session.navGeneration ?? 0;
+        // Auto-challenge solver — try button/checkbox click on challenge pages
+        if (result.classification.type === 'challenge' && result.quality !== "BLOCKED") {
+            const challengeResult = await attemptChallengeResolve(result.page, result.session, result.classification.confidence);
+            if (challengeResult) {
+                const duration = Date.now() - startTime;
+                HarnessIntelligence.recordToolCall(result.session.id, 'navigate', { url }, `Navigated to ${url} (challenge resolved)`, duration);
+                return ok(challengeResult);
+            }
+        }
+        const duration = Date.now() - startTime;
+        const output = formatAdaptiveResult(result);
+        HarnessIntelligence.recordToolCall(result.session.id, 'navigate', { url }, `Navigated to ${url} (${result.snapshot.nodeCount} elements${result.escalation ? `, escalation L${result.escalation.level}` : ''})`, duration);
+        return ok(output);
     }
     catch (e) {
         return err(`Navigate failed: ${e.message}`);
@@ -319,15 +565,122 @@ server.registerTool("snapshot", {
         sessionId: z.string().describe("Session ID."),
         selector: z.string().optional().describe("CSS selector to scope snapshot to a page region."),
         maxChars: z.number().int().default(MAX_SNAPSHOT_CHARS).describe("Max output chars."),
-    }),
+    }).strict(),
 }, async ({ sessionId, selector, maxChars }) => {
     try {
+        const startTime = Date.now();
         const session = requireSession(sessionId);
-        const text = await snapAndFormat(session, { selector, maxChars });
-        return ok(text);
+        const page = getPage(session);
+        // Take the snapshot
+        const snapResult = await snapEngine.snapshot(page, session, {
+            interactiveOnly: true,
+            maxChars: maxChars ?? MAX_SNAPSHOT_CHARS,
+            selector,
+        });
+        // Mark refs as fresh — they match the current nav generation
+        session.refNavGeneration = session.navGeneration ?? 0;
+        const url = page.url();
+        let title = "";
+        try {
+            title = await page.title();
+        }
+        catch { /* */ }
+        let output = `[${session.id}] ${title}\n${url}\n${snapResult.nodeCount} elements\n\n${snapResult.text}`;
+        // Incremental diff: compare with previous snapshot
+        const diff = SnapshotDiffer.diff(session.id, url, snapResult);
+        if (!diff.isFirst && diff.changeCount >= 0) {
+            output += `\n\n${diff.diffText}`;
+        }
+        // Page classification
+        try {
+            let meta;
+            try {
+                meta = await page.evaluate(() => {
+                    const og = document.querySelector('meta[property="og:type"]')?.getAttribute("content") ?? undefined;
+                    const desc = document.querySelector('meta[name="description"]')?.getAttribute("content") ?? undefined;
+                    const robots = document.querySelector('meta[name="robots"]')?.getAttribute("content") ?? undefined;
+                    let jsonLdType;
+                    const ld = document.querySelector('script[type="application/ld+json"]');
+                    if (ld) {
+                        try {
+                            const parsed = JSON.parse(ld.textContent ?? "");
+                            jsonLdType = parsed["@type"];
+                        }
+                        catch { /* */ }
+                    }
+                    return { ogType: og, jsonLdType, robots, description: desc };
+                });
+            }
+            catch { /* meta extraction is best-effort */ }
+            const classification = PageClassifier.classify({
+                url,
+                snapshotText: snapResult.text,
+                meta,
+            });
+            output += `\n\n[page: ${classification.type} (${Math.round(classification.confidence * 100)}%)]`;
+        }
+        catch { /* classification is best-effort */ }
+        const duration = Date.now() - startTime;
+        HarnessIntelligence.recordToolCall(sessionId, 'snapshot', { selector }, `Snapshot: ${snapResult.nodeCount} elements`, duration);
+        return ok(output);
     }
     catch (e) {
         return err(`Snapshot failed: ${e.message}`);
+    }
+});
+// ─── diff ──────────────────────────────────────────────────────────────────
+server.registerTool("diff", {
+    title: "Snapshot Diff",
+    description: "Compare the current page state against the last snapshot for this session. " +
+        "Returns only what changed (additions, removals, changes) — massive token savings vs a full re-snapshot. " +
+        "Use after 'act' instead of 'snapshot' when you just need to see what changed. " +
+        "On first call (no previous snapshot), returns the full snapshot with a note. " +
+        "Use 'selector' to scope the diff to a page region.",
+    inputSchema: z.object({
+        sessionId: z.string().describe("Session ID."),
+        selector: z.string().optional().describe("CSS selector to scope snapshot to a page region."),
+    }).strict(),
+}, async ({ sessionId, selector }) => {
+    try {
+        const startTime = Date.now();
+        const session = requireSession(sessionId);
+        const page = getPage(session);
+        // Take a fresh snapshot
+        const snapResult = await snapEngine.snapshot(page, session, {
+            interactiveOnly: true,
+            maxChars: MAX_SNAPSHOT_CHARS,
+            selector,
+        });
+        // Mark refs as fresh — they match the current nav generation
+        session.refNavGeneration = session.navGeneration ?? 0;
+        const url = page.url();
+        let title = "";
+        try {
+            title = await page.title();
+        }
+        catch { /* */ }
+        // Compare against previous snapshot
+        const diff = SnapshotDiffer.diff(session.id, url, snapResult);
+        let output;
+        if (diff.isFirst) {
+            // No previous snapshot — return the full snapshot with a note
+            output =
+                `[${session.id}] ${title}\n${url}\n${snapResult.nodeCount} elements\n` +
+                    `[first snapshot — no previous state to diff against, returning full snapshot]\n\n` +
+                    snapResult.text;
+        }
+        else {
+            output =
+                `[${session.id}] ${title}\n${url}\n` +
+                    `${diff.diffText}\n` +
+                    `[diff: ${diff.diffTokenEstimate} tokens vs full: ${diff.fullTokenEstimate} tokens — ${diff.fullTokenEstimate > 0 ? Math.round((1 - diff.diffTokenEstimate / diff.fullTokenEstimate) * 100) : 0}% saved]`;
+        }
+        const duration = Date.now() - startTime;
+        HarnessIntelligence.recordToolCall(sessionId, 'diff', { selector }, `Diff: ${diff.changeCount} changes (first: ${diff.isFirst})`, duration);
+        return ok(output);
+    }
+    catch (e) {
+        return err(`Diff failed: ${e.message}`);
     }
 });
 // ─── act ────────────────────────────────────────────────────────────────────
@@ -336,7 +689,7 @@ server.registerTool("act", {
     description: "Perform a browser interaction: click, fill, type, check, select, press key, scroll, hover, mousemove, drag, upload, resize, back, forward. " +
         "Use @eN refs from navigate/snapshot as the target (e.g. '@e2'). CSS selectors also work. " +
         "drag: requires target (source) and target2 (destination). upload: requires target (file input) and filePaths. " +
-        "resize: requires width and height (no target needed). " +
+        "resize: requires width and height (no target needed). holdDuration: for click, holds mouse down for N ms (long-press). " +
         "Returns a fresh snapshot if the page navigated, or just the action result if it didn't.",
     inputSchema: z.object({
         sessionId: z.string().describe("Session ID."),
@@ -373,21 +726,45 @@ server.registerTool("act", {
             .describe("File path(s) for upload action. Single string or array of strings."),
         width: z.number().int().optional().describe("Viewport width for resize action."),
         height: z.number().int().optional().describe("Viewport height for resize action."),
-    }),
-}, async ({ sessionId, action, target, value, key, scrollDirection, scrollAmount, typeDelay, x, y, target2, filePaths, width, height }) => {
+        holdDuration: z.number().int().min(0).max(10000).optional().describe("Hold duration in ms for click action (long-press). Uses mouse.down() + wait + mouse.up()."),
+    }).strict(),
+}, async ({ sessionId, action, target, value, key, scrollDirection, scrollAmount, typeDelay, x, y, target2, filePaths, width, height, holdDuration }) => {
     try {
+        const startTime = Date.now(); // P0-3: track duration for recordToolCall
         const session = requireSession(sessionId);
         const page = getPage(session);
         const urlBefore = page.url();
-        // Resolve target to a Playwright locator
+        // Harness Intelligence: capture pre-state for outcome detection
+        // P0-1: Save refs BEFORE try so they're restored in finally even if snapshot() throws.
+        // Without this, refs from navigate's snapshot are destroyed before act can use them.
+        let preSnapshotText = "";
+        const savedRefMap = new Map(session.refMap);
+        const savedRefCounter = session.refCounter;
+        const savedRefNavGen = session.refNavGeneration;
+        try {
+            const preSnap = await snapEngine.snapshot(page, session, { interactiveOnly: true, maxChars: MAX_SNAPSHOT_CHARS });
+            preSnapshotText = preSnap.text;
+            HarnessIntelligence.capturePreState(session.id, urlBefore, preSnapshotText);
+        }
+        catch { /* pre-state capture is best-effort */ }
+        finally {
+            // P0-1: Always restore refs so act's resolve() can still find them
+            session.refMap = savedRefMap;
+            session.refCounter = savedRefCounter;
+            session.refNavGeneration = savedRefNavGen;
+        }
+        // Resolve target to a Playwright locator (with stale-ref detection)
         const resolve = (ref) => {
             if (ref.startsWith("@e")) {
+                if ((session.navGeneration ?? 0) > (session.refNavGeneration ?? 0)) {
+                    throw new Error(`Ref ${ref} is stale — the page has navigated since the last snapshot. Take a new snapshot to get updated refs.`);
+                }
                 const selector = session.refMap.get(ref);
                 if (!selector)
                     throw new Error(`Ref ${ref} not found. Take a fresh snapshot.`);
                 return page.locator(selector);
             }
-            return page.locator(ref);
+            return page.locator(ref); // CSS selectors don't go stale
         };
         switch (action) {
             case "click":
@@ -398,8 +775,24 @@ server.registerTool("act", {
                 const loc = resolve(target);
                 if (action === "click") {
                     await thinkPause.beforeAction("click");
-                    // Humanized click: Bezier move to target center, dwell, then click
-                    if (isHumanizeEnabled()) {
+                    if (holdDuration) {
+                        // Long-press: mouse down, wait, mouse up
+                        try {
+                            const box = await loc.boundingBox({ timeout: 5000 });
+                            if (!box) {
+                                throw new Error(`Element not found or not visible for target '${target}' — cannot perform long-press. Verify the selector or take a fresh snapshot.`);
+                            }
+                            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+                            await page.mouse.down();
+                            await page.waitForTimeout(holdDuration);
+                            await page.mouse.up();
+                        }
+                        catch (e) {
+                            throw new Error(`holdDuration click failed on '${target}': ${e.message}`);
+                        }
+                    }
+                    else if (isHumanizeEnabled()) {
+                        // Humanized click: Bezier move to target center, dwell, then click
                         const box = await loc.boundingBox();
                         if (box) {
                             const cx = box.x + box.width / 2;
@@ -559,16 +952,30 @@ server.registerTool("act", {
         }
         // If the URL changed, return a full snapshot of the new page
         const urlAfter = page.url();
+        // Harness Intelligence: analyze post-action state
+        let harnessOutput = "";
+        try {
+            const postSnap = await snapEngine.snapshot(page, session, { interactiveOnly: true, maxChars: MAX_SNAPSHOT_CHARS });
+            const harnessState = HarnessIntelligence.analyzePostAction(session.id, action, target, value, urlAfter, postSnap.text);
+            // Only append harness output if there's something noteworthy
+            if (harnessState.outcome !== "SUCCESS" || harnessState.loopWarning || harnessState.stuckWarning) {
+                harnessOutput = "\n\n" + formatHarnessOutput(harnessState);
+            }
+        }
+        catch { /* harness analysis is best-effort */ }
+        // P0-3: Record act tool call in session memory
+        const actDuration = Date.now() - startTime;
+        HarnessIntelligence.recordToolCall(sessionId, 'act', { action, target, value }, `${action}${target ? ` ${target}` : ''}`, actDuration);
         if (urlAfter !== urlBefore) {
             try {
                 await page.waitForLoadState("load", { timeout: 5000 });
             }
             catch { /* timeout ok */ }
             const text = await snapAndFormat(session);
-            return ok(`[navigated → ${urlAfter}]\n\n${text}`);
+            return ok(`[navigated → ${urlAfter}]\n\n${text}${harnessOutput}`);
         }
         // Same page — brief confirmation
-        return ok(`Done: ${action}${target ? ` ${target}` : ""}${value ? ` "${value}"` : ""}`);
+        return ok(`Done: ${action}${target ? ` ${target}` : ""}${value ? ` "${value}"` : ""}${harnessOutput}`);
     }
     catch (e) {
         return err(`Action failed: ${e.message}`);
@@ -583,9 +990,10 @@ server.registerTool("screenshot", {
         fullPage: z.boolean().default(false).describe("Capture full scrollable page."),
         selector: z.string().optional().describe("CSS selector to capture a specific element."),
         savePath: z.string().optional().describe("Optional file path to save the screenshot to disk. If omitted, image is returned inline only."),
-    }),
+    }).strict(),
 }, async ({ sessionId, fullPage, selector, savePath }) => {
     try {
+        const startTime = Date.now(); // P0-3
         const session = requireSession(sessionId);
         const page = getPage(session);
         let imageBuffer;
@@ -602,6 +1010,9 @@ server.registerTool("screenshot", {
             content.push({ type: "text", text: `Saved: ${savePath}` });
         }
         content.push({ type: "image", data: imageBuffer.toString("base64"), mimeType: "image/png" });
+        // P0-3: Record screenshot tool call in session memory
+        const duration = Date.now() - startTime;
+        HarnessIntelligence.recordToolCall(sessionId, 'screenshot', { fullPage, selector, savePath }, `Screenshot captured${savePath ? ` → ${savePath}` : ''}`, duration);
         return { content };
     }
     catch (e) {
@@ -623,20 +1034,24 @@ server.registerTool("extract", {
         target: z.string().optional().describe("@eN ref or CSS selector. Omit for page-level."),
         js: z.string().optional().describe("JavaScript expression for type='js'."),
         maxChars: z.number().int().default(5000).describe("Max output characters."),
-    }),
+    }).strict(),
 }, async ({ sessionId, type, target, js, maxChars }) => {
     try {
+        const startTime = Date.now(); // P0-3
         const session = requireSession(sessionId);
         const page = getPage(session);
         let result;
         const resolve = (ref) => {
             if (ref.startsWith("@e")) {
+                if ((session.navGeneration ?? 0) > (session.refNavGeneration ?? 0)) {
+                    throw new Error(`Ref ${ref} is stale — the page has navigated since the last snapshot. Take a new snapshot to get updated refs.`);
+                }
                 const sel = session.refMap.get(ref);
                 if (!sel)
                     throw new Error(`Ref ${ref} not found.`);
                 return page.locator(sel);
             }
-            return page.locator(ref);
+            return page.locator(ref); // CSS selectors don't go stale
         };
         switch (type) {
             case "title":
@@ -670,10 +1085,19 @@ server.registerTool("extract", {
             }
             case "text": {
                 if (target) {
-                    result = (await resolve(target).textContent()) ?? "";
+                    const el = resolve(target);
+                    result = await el.evaluate((node) => {
+                        const clone = node.cloneNode(true);
+                        clone.querySelectorAll('script, style, noscript, template, [hidden], [aria-hidden="true"]').forEach(e => e.remove());
+                        return clone.innerText?.trim() ?? clone.textContent?.trim() ?? "";
+                    });
                 }
                 else {
-                    result = (await page.locator("body").textContent()) ?? "";
+                    result = await page.evaluate(() => {
+                        const clone = document.body.cloneNode(true);
+                        clone.querySelectorAll('script, style, noscript, template, [hidden], [aria-hidden="true"]').forEach(e => e.remove());
+                        return clone.innerText?.trim() ?? "";
+                    });
                 }
                 break;
             }
@@ -690,6 +1114,9 @@ server.registerTool("extract", {
         if (result.length > maxChars) {
             result = result.substring(0, maxChars) + "\n... (truncated)";
         }
+        // P0-3: Record extract in session memory
+        const duration = Date.now() - startTime;
+        HarnessIntelligence.recordToolCall(sessionId, 'extract', { type, target }, `Extract ${type}: ${result.slice(0, 80)}`, duration);
         return ok(result || "(empty)");
     }
     catch (e) {
@@ -699,8 +1126,8 @@ server.registerTool("extract", {
 // ─── pool_status ────────────────────────────────────────────────────────────
 server.registerTool("pool_status", {
     title: "Pool Status & Resources",
-    description: "Show pool stats, resource usage (memory, uptime), and all active session summaries.",
-    inputSchema: z.object({}),
+    description: "Show pool stats, resource usage (memory, uptime), and all active session summaries. Shows per-session idle time. Sessions approaching 30-minute idle timeout should be refreshed or saved.",
+    inputSchema: z.object({}).strict(),
 }, async () => {
     const stats = sessions.getStats();
     const resources = sessions.getResourceUsage();
@@ -734,7 +1161,7 @@ server.registerTool("network_log", {
         statusMin: z.number().int().optional().describe("Minimum status code (e.g. 400 for errors)."),
         statusMax: z.number().int().optional().describe("Maximum status code."),
         contentType: z.string().optional().describe("Content-type filter (e.g. 'json')."),
-    }),
+    }).strict(),
 }, async ({ sessionId, urlPattern, method, statusMin, statusMax, contentType }) => {
     try {
         const session = requireSession(sessionId);
@@ -756,7 +1183,7 @@ server.registerTool("console_log", {
     inputSchema: z.object({
         sessionId: z.string().describe("Session ID."),
         level: z.string().optional().describe("Filter by level: error, warn, log, info, debug."),
-    }),
+    }).strict(),
 }, async ({ sessionId, level }) => {
     try {
         const session = requireSession(sessionId);
@@ -781,13 +1208,16 @@ server.registerTool("network_intercept", {
         mockStatus: z.number().int().optional().describe("HTTP status for mock responses."),
         mockBody: z.string().optional().describe("Response body for mock responses."),
         mockContentType: z.string().optional().describe("Content-type for mock responses. Default: application/json."),
-    }),
+    }).strict(),
 }, async ({ sessionId, action, ruleId, urlPattern, mockStatus, mockBody, mockContentType }) => {
     try {
+        const startTime = Date.now();
         const session = requireSession(sessionId);
         const page = getPage(session);
         if (action === "remove") {
             await networkIntelligence.removeIntercept(page, session, ruleId);
+            const duration = Date.now() - startTime;
+            HarnessIntelligence.recordToolCall(sessionId, 'network_intercept', { action, ruleId }, `Removed intercept rule: ${ruleId}`, duration);
             return ok(`Removed intercept rule: ${ruleId}`);
         }
         if (!urlPattern)
@@ -805,6 +1235,8 @@ server.registerTool("network_intercept", {
             } : {}),
         };
         await networkIntelligence.addIntercept(page, session, rule);
+        const duration = Date.now() - startTime;
+        HarnessIntelligence.recordToolCall(sessionId, 'network_intercept', { action, ruleId, urlPattern }, `Intercept rule added: ${ruleId} → ${action} ${urlPattern}`, duration);
         return ok(`Intercept rule added: ${ruleId} → ${action} ${urlPattern}`);
     }
     catch (e) {
@@ -824,9 +1256,10 @@ server.registerTool("wait_for", {
         text: z.string().optional().describe("Text to find (for text condition) or URL pattern (for navigation)."),
         js: z.string().optional().describe("JS expression that should return truthy (for js condition)."),
         timeout: z.number().int().default(10000).describe("Max wait time in ms. Default 10000, max 30000."),
-    }),
+    }).strict(),
 }, async ({ sessionId, condition, target, text, js, timeout }) => {
     try {
+        const startTime = Date.now();
         const session = requireSession(sessionId);
         if (condition === "js" && !ALLOW_JS) {
             return err("JavaScript evaluation is disabled. Set LEAP_ALLOW_JS=true to enable.");
@@ -834,6 +1267,8 @@ server.registerTool("wait_for", {
         const page = getPage(session);
         await tabManager.waitFor(page, session, { type: condition, target, text, js, timeout });
         const snap = await snapAndFormat(session);
+        const duration = Date.now() - startTime;
+        HarnessIntelligence.recordToolCall(sessionId, 'wait_for', { condition, target, text }, `Wait complete: ${condition}`, duration);
         return ok(`Wait complete: ${condition}\n\n${snap}`);
     }
     catch (e) {
@@ -847,7 +1282,7 @@ server.registerTool("tabs_list", {
         "New tabs (popups, OAuth windows) are automatically tracked.",
     inputSchema: z.object({
         sessionId: z.string().describe("Session ID."),
-    }),
+    }).strict(),
 }, async ({ sessionId }) => {
     try {
         const session = requireSession(sessionId);
@@ -872,12 +1307,15 @@ server.registerTool("tab_switch", {
     inputSchema: z.object({
         sessionId: z.string().describe("Session ID."),
         tabIndex: z.number().int().describe("Tab index to switch to. -1 for last (most recent) tab."),
-    }),
+    }).strict(),
 }, async ({ sessionId, tabIndex }) => {
     try {
+        const startTime = Date.now();
         const session = requireSession(sessionId);
         tabManager.switchTab(session, tabIndex);
         const snap = await snapAndFormat(session);
+        const duration = Date.now() - startTime;
+        HarnessIntelligence.recordToolCall(sessionId, 'tab_switch', { tabIndex }, `Switched to tab ${tabIndex}`, duration);
         return ok(`Switched to tab ${tabIndex}\n\n${snap}`);
     }
     catch (e) {
@@ -892,12 +1330,15 @@ server.registerTool("tab_close", {
     inputSchema: z.object({
         sessionId: z.string().describe("Session ID."),
         tabIndex: z.number().int().optional().describe("Tab index to close. Omit to close the active tab."),
-    }),
+    }).strict(),
 }, async ({ sessionId, tabIndex }) => {
     try {
+        const startTime = Date.now();
         const session = requireSession(sessionId);
         await tabManager.closeTab(session, tabIndex);
         const snap = await snapAndFormat(session);
+        const duration = Date.now() - startTime;
+        HarnessIntelligence.recordToolCall(sessionId, 'tab_close', { tabIndex }, `Tab closed`, duration);
         return ok(`Tab closed.\n\n${snap}`);
     }
     catch (e) {
@@ -911,7 +1352,7 @@ server.registerTool("session_health", {
         "Omit sessionId to check all sessions. Quick diagnostic for debugging.",
     inputSchema: z.object({
         sessionId: z.string().optional().describe("Session ID. Omit to check all."),
-    }),
+    }).strict(),
 }, async ({ sessionId }) => {
     try {
         if (sessionId) {
@@ -943,15 +1384,18 @@ server.registerTool("add_init_script", {
     inputSchema: z.object({
         sessionId: z.string().describe("Session ID."),
         script: z.string().describe("JavaScript code to inject. Runs in page context before any page scripts."),
-    }),
+    }).strict(),
 }, async ({ sessionId, script }) => {
     try {
+        const startTime = Date.now();
         const session = requireSession(sessionId);
         // Apply to all current pages in the session
         const pages = session.context.pages();
         for (const page of pages) {
             await page.addInitScript(script);
         }
+        const duration = Date.now() - startTime;
+        HarnessIntelligence.recordToolCall(sessionId, 'add_init_script', { script: script.slice(0, 80) }, `Init script added (${pages.length} page(s))`, duration);
         return ok(`Init script added to session ${sessionId} (${pages.length} page(s)). Will persist across navigations.`);
     }
     catch (e) {
@@ -972,7 +1416,7 @@ const BatchActionSchema = z.object({
     x: z.number().optional().describe("X coordinate for mousemove."),
     y: z.number().optional().describe("Y coordinate for mousemove."),
     delayAfter: z.number().optional().describe("Delay in ms to wait after this action completes."),
-});
+}).strict();
 server.registerTool("batch_actions", {
     title: "Batch Actions",
     description: "Execute multiple browser actions sequentially in a single MCP call. " +
@@ -982,20 +1426,24 @@ server.registerTool("batch_actions", {
     inputSchema: z.object({
         sessionId: z.string().describe("Session ID."),
         actions: z.array(BatchActionSchema).min(1).max(100).describe("Array of actions to execute sequentially."),
-    }),
+    }).strict(),
 }, async ({ sessionId, actions }) => {
     try {
+        const startTime = Date.now();
         const session = requireSession(sessionId);
         const page = getPage(session);
         const results = [];
         const resolve = (ref) => {
             if (ref.startsWith("@e")) {
+                if ((session.navGeneration ?? 0) > (session.refNavGeneration ?? 0)) {
+                    throw new Error(`Ref ${ref} is stale — the page has navigated since the last snapshot. Take a new snapshot to get updated refs.`);
+                }
                 const selector = session.refMap.get(ref);
                 if (!selector)
                     throw new Error(`Ref ${ref} not found. Take a fresh snapshot.`);
                 return page.locator(selector);
             }
-            return page.locator(ref);
+            return page.locator(ref); // CSS selectors don't go stale
         };
         for (let i = 0; i < actions.length; i++) {
             const a = actions[i];
@@ -1090,10 +1538,346 @@ server.registerTool("batch_actions", {
                 await new Promise((r) => setTimeout(r, Math.min(a.delayAfter, 10000)));
             }
         }
+        const duration = Date.now() - startTime;
+        HarnessIntelligence.recordToolCall(sessionId, 'batch_actions', { actionCount: actions.length }, `${results.length}/${actions.length} actions completed`, duration);
         return ok(`Batch complete (${results.length}/${actions.length} actions)\n\n${results.join("\n")}`);
     }
     catch (e) {
         return err(`Batch failed: ${e.message}`);
+    }
+});
+// ─── execute ──────────────────────────────────────────────────────────────
+server.registerTool("execute", {
+    title: "Execute Script",
+    description: "Run a Playwright script in a sandboxed environment. One tool call replaces 5-20 sequential MCP round trips. " +
+        "Use for complex flows with conditional logic, loops, error handling.",
+    inputSchema: z.object({
+        sessionId: z.string(),
+        script: z
+            .string()
+            .describe("JavaScript async function body with access to { page, context }. Example: 'await page.goto(\"...\"); return await page.title();'"),
+        timeout: z
+            .number()
+            .optional()
+            .describe("Timeout in ms. Default: 60000, max: 300000."),
+    }).strict(),
+}, async ({ sessionId, script, timeout }) => {
+    try {
+        const startTime = Date.now();
+        if (!ALLOW_EXECUTE) {
+            return err("execute tool is disabled. Set LEAP_ALLOW_EXECUTE=true to enable.");
+        }
+        const session = requireSession(sessionId);
+        const result = await ScriptExecutor.execute(session, { script, timeout });
+        const lines = [
+            `Return: ${result.returnValue}`,
+            `Duration: ${result.duration}ms`,
+        ];
+        if (result.console.length > 0) {
+            lines.push("", "Console:", ...result.console);
+        }
+        const duration = Date.now() - startTime;
+        HarnessIntelligence.recordToolCall(sessionId, 'execute', { code: script.slice(0, 80) }, `Result: ${String(result.returnValue).slice(0, 100)}`, duration);
+        return ok(lines.join("\n"));
+    }
+    catch (e) {
+        return err(e.message);
+    }
+});
+// ─── api_discover ─────────────────────────────────────────────────────────
+server.registerTool("api_discover", {
+    title: "Discover Page APIs",
+    description: "List JSON APIs the page has called. Captured automatically from XHR/fetch traffic. " +
+        "Classifies into: data, tracking, auth, cdn, ads.",
+    inputSchema: z.object({
+        sessionId: z.string(),
+        category: z
+            .enum(["data", "tracking", "auth", "cdn", "ads"])
+            .optional(),
+        minConfidence: z
+            .number()
+            .optional()
+            .describe("Minimum classification confidence (0-1). Default: 0."),
+    }).strict(),
+}, async ({ sessionId, category, minConfidence }) => {
+    try {
+        requireSession(sessionId);
+        const result = ApiIntelligence.discover(sessionId, { category, minConfidence });
+        if (result.total === 0) {
+            return ok("No API calls captured yet. Navigate to a page first.");
+        }
+        const lines = [
+            `${result.total} API calls captured (data: ${result.summary.data}, tracking: ${result.summary.tracking}, auth: ${result.summary.auth}, cdn: ${result.summary.cdn}, ads: ${result.summary.ads})`,
+            "",
+        ];
+        for (const cap of result.captured) {
+            const gql = cap.graphql ? ` [GraphQL: ${cap.graphql.operationType ?? "query"} ${cap.graphql.operationName ?? ""}]` : "";
+            const shape = cap.dataShape ? ` keys: ${Object.keys(cap.dataShape).join(", ")}` : "";
+            lines.push(`[${cap.index}] ${cap.method} ${cap.status} ${cap.url} (${cap.category} ${Math.round(cap.confidence * 100)}%)${gql}${shape}`);
+        }
+        return ok(lines.join("\n"));
+    }
+    catch (e) {
+        return err(e.message);
+    }
+});
+// ─── api_export ───────────────────────────────────────────────────────────
+server.registerTool("api_export", {
+    title: "Export OpenAPI Spec",
+    description: "Generate an OpenAPI v3 spec from observed API traffic. " +
+        "Navigate pages first to capture traffic, then export.",
+    inputSchema: z.object({
+        sessionId: z.string(),
+        title: z.string().optional().describe("API spec title."),
+        includeTracking: z
+            .boolean()
+            .optional()
+            .describe("Include tracking/analytics endpoints. Default: false."),
+    }).strict(),
+}, async ({ sessionId, title, includeTracking }) => {
+    try {
+        requireSession(sessionId);
+        const spec = ApiIntelligence.exportOpenApi(sessionId, { title, includeTracking });
+        const pathCount = Object.keys(spec.paths).length;
+        if (pathCount === 0) {
+            return ok("No API endpoints captured. Navigate to pages first to capture traffic.");
+        }
+        return ok(`OpenAPI spec (${pathCount} endpoints):\n\n${JSON.stringify(spec, null, 2)}`);
+    }
+    catch (e) {
+        return err(e.message);
+    }
+});
+// ─── session_memory ───────────────────────────────────────────────────────
+server.registerTool("session_memory", {
+    title: "Session Action History",
+    description: "Recall what actions were performed in this session. " +
+        "Useful after context window compression to recover lost context.",
+    inputSchema: z.object({
+        sessionId: z.string(),
+        limit: z
+            .number()
+            .optional()
+            .describe("Number of recent actions to return. Default: 20."),
+    }).strict(),
+}, async ({ sessionId, limit }) => {
+    try {
+        requireSession(sessionId);
+        const history = HarnessIntelligence.getHistory(sessionId, limit ?? 20);
+        if (history.length === 0) {
+            return ok("No actions recorded in this session yet.");
+        }
+        const lines = history.map((rec) => {
+            const parts = [
+                `[${rec.index}]`,
+                rec.actionType,
+                rec.target ?? "",
+                rec.value ? `"${rec.value}"` : "",
+                `→ ${rec.outcome}`,
+                `(${rec.duration}ms)`,
+            ];
+            // Include tool params so context recovery knows WHAT was done
+            if (rec.toolCall) {
+                const p = rec.toolCall.params;
+                const paramStr = Object.entries(p)
+                    .filter(([, v]) => v !== undefined && v !== null && v !== "")
+                    .map(([k, v]) => `${k}=${typeof v === "string" && v.length > 60 ? v.slice(0, 60) + "…" : v}`)
+                    .join(", ");
+                if (paramStr)
+                    parts.push(`{${paramStr}}`);
+                if (rec.toolCall.resultSummary)
+                    parts.push(`"${rec.toolCall.resultSummary}"`);
+            }
+            else {
+                if (rec.url)
+                    parts.push(rec.url);
+            }
+            return parts.filter(Boolean).join(" ");
+        });
+        return ok(`${history.length} action(s):\n\n${lines.join("\n")}`);
+    }
+    catch (e) {
+        return err(e.message);
+    }
+});
+// ─── profile_list ─────────────────────────────────────────────────────────
+server.registerTool("profile_list", {
+    title: "List Auth Profiles",
+    description: "List saved persistent browser profiles with their auth status.",
+    inputSchema: z.object({}).strict(),
+}, async () => {
+    try {
+        try {
+            await fs.mkdir(LEAP_PROFILES_DIR, { recursive: true });
+        }
+        catch { /* */ }
+        let entries = [];
+        try {
+            entries = await fs.readdir(LEAP_PROFILES_DIR);
+        }
+        catch {
+            return ok("No profiles directory found.");
+        }
+        // Filter to directories only
+        const profiles = [];
+        for (const entry of entries) {
+            try {
+                const stat = await fs.stat(path.join(LEAP_PROFILES_DIR, entry));
+                if (stat.isDirectory()) {
+                    profiles.push(entry);
+                }
+            }
+            catch { /* skip */ }
+        }
+        if (profiles.length === 0) {
+            return ok("No saved profiles.");
+        }
+        const lines = profiles.map((name) => `${name}  →  ${path.join(LEAP_PROFILES_DIR, name)}`);
+        return ok(lines.join("\n"));
+    }
+    catch (e) {
+        return err(`List failed: ${e.message}`);
+    }
+});
+// ─── profile_delete ───────────────────────────────────────────────────────
+server.registerTool("profile_delete", {
+    title: "Delete Auth Profile",
+    description: "Delete a saved persistent browser profile and all its data.",
+    inputSchema: z.object({
+        name: z.string().describe("Profile name to delete."),
+    }).strict(),
+}, async ({ name }) => {
+    try {
+        const safeName = name.replace(/[^a-zA-Z0-9_-]/g, "");
+        if (!safeName)
+            return err("Invalid profile name.");
+        const profileDir = path.join(LEAP_PROFILES_DIR, safeName);
+        const resolved = path.resolve(profileDir);
+        if (!resolved.startsWith(path.resolve(LEAP_PROFILES_DIR))) {
+            return err("Invalid profile path.");
+        }
+        try {
+            await fs.access(profileDir);
+        }
+        catch {
+            return err(`Profile not found: ${safeName}`);
+        }
+        await fs.rm(profileDir, { recursive: true, force: true });
+        return ok(`Deleted profile: ${safeName}`);
+    }
+    catch (e) {
+        return err(`Delete failed: ${e.message}`);
+    }
+});
+// ─── paginate ────────────────────────────────────────────────────────────
+server.registerTool("paginate", {
+    title: "Pagination Extraction",
+    description: "Extract data across multiple pages in a single call. Handles click-next, infinite scroll, and URL-pattern pagination. " +
+        "Auto-detects 'next' buttons when nextSelector='auto'. Returns extracted content from each page plus metadata. " +
+        "Replaces 3-4 tool calls per page with one invocation. Cap: 50 pages, 100K total chars.",
+    inputSchema: z.object({
+        sessionId: z.string().describe("Session ID."),
+        extractType: z.enum(["text", "html", "js"]).default("text").describe("What to extract from each page."),
+        extractTarget: z.string().optional().describe("CSS selector to scope extraction to a specific container."),
+        extractJs: z.string().optional().describe("JavaScript expression for extractType='js'."),
+        nextSelector: z.string().default("auto").describe("CSS selector for the next button, or 'auto' to detect automatically."),
+        paginationType: z.enum(["click", "scroll", "url"]).default("click").describe("Pagination strategy: click (next button), scroll (infinite scroll), url (URL pattern)."),
+        urlPattern: z.string().optional().describe("URL pattern with {page} placeholder for paginationType='url'."),
+        maxPages: z.number().int().min(1).max(50).default(10).describe("Maximum pages to extract. Default: 10."),
+        delayMs: z.number().int().min(0).max(30000).default(1000).describe("Delay between pages in ms. Default: 1000."),
+        maxCharsPerPage: z.number().int().min(100).max(50000).default(5000).describe("Max characters per page extraction. Default: 5000."),
+        stopWhen: z.enum(["no_next", "empty", "duplicate", "auto"]).default("auto").describe("Stop condition. Default: auto (all heuristics)."),
+    }).strict(),
+}, async ({ sessionId, extractType, extractTarget, extractJs, nextSelector, paginationType, urlPattern, maxPages, delayMs, maxCharsPerPage, stopWhen }) => {
+    try {
+        const session = requireSession(sessionId);
+        const page = getPage(session);
+        const result = await paginate(page, session, {
+            extractType, extractTarget, extractJs, nextSelector, paginationType, urlPattern, maxPages, delayMs, maxCharsPerPage, stopWhen,
+        });
+        const lines = [];
+        lines.push(`Pagination complete: ${result.metadata.totalPages} pages, ${result.metadata.totalChars} chars`);
+        lines.push(`Stopped: ${result.metadata.stoppedBecause} | Duration: ${result.metadata.duration}ms`);
+        lines.push(`URLs: ${result.metadata.urls.join(", ")}`);
+        lines.push("");
+        for (const p of result.pages) {
+            lines.push(`--- Page ${p.pageNum} (${p.url}) [~${p.tokens} tokens] ---`);
+            lines.push(p.data);
+            lines.push("");
+        }
+        return ok(lines.join("\n"));
+    }
+    catch (e) {
+        return err(`Paginate failed: ${e.message}`);
+    }
+});
+// ─── session_export ──────────────────────────────────────────────────────
+server.registerTool("session_export", {
+    title: "Export Session Recording",
+    description: "Export session action history as a replayable recording. " +
+        "Creates a JSON script from all mutating actions with @eN refs resolved to stable selectors. " +
+        "Use format='playwright' to get a Playwright JS script compatible with the execute tool.",
+    inputSchema: z.object({
+        sessionId: z.string().describe("Session ID."),
+        name: z.string().optional().describe("Recording name. Default: auto-generated."),
+        keepExtracts: z.boolean().optional().describe("Include extract steps in the recording. Default: false."),
+        format: z.enum(["json", "playwright"]).optional().describe("Output format. Default: json."),
+    }).strict(),
+}, async ({ sessionId, name, keepExtracts, format }) => {
+    try {
+        const session = requireSession(sessionId);
+        const result = exportSession(sessionId, session, { name, keepExtracts, format });
+        if (typeof result === "string") {
+            return ok(result);
+        }
+        const json = JSON.stringify(result, null, 2);
+        const summary = `Recording "${result.name}": ${result.steps.length} steps, ${Object.keys(result.params).length} param(s)`;
+        return ok(`${summary}\n\n${json}`);
+    }
+    catch (e) {
+        return err(e.message);
+    }
+});
+// ─── session_replay ──────────────────────────────────────────────────────
+server.registerTool("session_replay", {
+    title: "Replay Session Recording",
+    description: "Replay a recording in the current session. Executes each step directly against the browser. " +
+        "Override {{placeholder}} params with the params object. Set onError='skip' to continue past failures.",
+    inputSchema: z.object({
+        sessionId: z.string().describe("Session ID."),
+        recording: z.string().describe("Recording JSON string (from session_export)."),
+        params: z.record(z.string()).optional().describe("Parameter overrides for {{placeholder}} values."),
+        onError: z.enum(["stop", "skip"]).optional().describe("Error handling: stop (default) or skip."),
+    }).strict(),
+}, async ({ sessionId, recording: recordingJson, params, onError }) => {
+    try {
+        const session = requireSession(sessionId);
+        const page = getPage(session);
+        let recording;
+        try {
+            recording = JSON.parse(recordingJson);
+        }
+        catch {
+            return err("Invalid recording JSON. Pass the JSON output from session_export.");
+        }
+        if (recording.version !== 1) {
+            return err(`Unsupported recording version: ${recording.version}. Expected 1.`);
+        }
+        const result = await replayRecording(recording, session, page, params, { onError });
+        const lines = [
+            `Replay "${recording.name}": ${result.status}`,
+            `${result.stepsCompleted}/${result.stepsTotal} steps completed (${result.totalDuration}ms)`,
+            "",
+        ];
+        for (const r of result.results) {
+            const status = r.status === "ok" ? "OK" : "ERR";
+            const errMsg = r.error ? ` — ${r.error}` : "";
+            lines.push(`  [${r.step}] ${status} ${r.tool} (${r.duration}ms)${errMsg}`);
+        }
+        return ok(lines.join("\n"));
+    }
+    catch (e) {
+        return err(e.message);
     }
 });
 // ─── CLI Flags ─────────────────────────────────────────────────────────────
@@ -1107,10 +1891,10 @@ async function runDoctor() {
         status: major >= 18 ? "pass" : "fail",
         detail: `v${nodeVersion}`,
     });
-    // Playwright chromium binary
+    // Chromium binary (via playwright-core)
     let chromiumPath = "";
     try {
-        const { chromium } = await import("playwright");
+        const { chromium } = await import("playwright-core");
         chromiumPath = chromium.executablePath();
         await fs.access(chromiumPath);
         checks.push({ label: "Chromium binary", status: "pass", detail: chromiumPath });
@@ -1119,13 +1903,13 @@ async function runDoctor() {
         checks.push({
             label: "Chromium binary",
             status: "fail",
-            detail: "Not found. Run: npx playwright install chromium",
+            detail: "Not found. Set LEAP_CHANNEL=chrome to use system Chrome, or run: npx playwright-core install chromium",
         });
     }
     // Can launch browser
     if (chromiumPath) {
         try {
-            const { chromium } = await import("playwright");
+            const { chromium } = await import("playwright-core");
             const browser = await chromium.launch({ headless: true });
             const page = await browser.newPage();
             await page.goto("about:blank");
@@ -1165,6 +1949,11 @@ async function runDoctor() {
     console.log(`  LEAP_STEALTH        = ${process.env.LEAP_STEALTH ?? "(default: true)"}`);
     console.log(`  LEAP_HUMANIZE       = ${process.env.LEAP_HUMANIZE ?? "(default: false)"}`);
     console.log(`  LEAP_LOG_LEVEL      = ${process.env.LEAP_LOG_LEVEL ?? "(default: info)"}`);
+    console.log(`  LEAP_HEADED         = ${process.env.LEAP_HEADED ?? "(default: false)"}`);
+    console.log(`  LEAP_EXTENSIONS     = ${process.env.LEAP_EXTENSIONS ?? "(none)"}`);
+    console.log(`  LEAP_PROFILES_DIR   = ${process.env.LEAP_PROFILES_DIR ?? "(default: ~/.leapfrog/chrome-profiles)"}`);
+    console.log(`  LEAP_ALLOW_EXECUTE  = ${process.env.LEAP_ALLOW_EXECUTE ?? "(default: true)"}`);
+    console.log(`  LEAP_CDP_ENDPOINT   = ${process.env.LEAP_CDP_ENDPOINT ?? "(none)"}`);
     console.log();
     const failed = checks.some((c) => c.status === "fail");
     process.exit(failed ? 1 : 0);
@@ -1175,9 +1964,14 @@ function printHelp() {
 Usage: npx leapfrog [options]
 
 Options:
-  --doctor    Run diagnostics and verify installation
-  --config    Print MCP configuration JSON
-  --help, -h  Show this help message
+  --doctor         Run diagnostics and verify installation
+  --stealth-audit  Run stealth self-test (bot detection checks)
+    --local-only     Tier 1 only (~2s, no external sites)
+    --full           Include Tier 3 extended checks (~45s)
+    --json           Output structured JSON
+    --headed         Run with visible browser window
+  --config         Print MCP configuration JSON
+  --help, -h       Show this help message
 
 Environment Variables:
   LEAP_MAX_SESSIONS    Max concurrent sessions (default: 15)
@@ -1228,6 +2022,15 @@ async function main() {
     }
     if (args.includes("--doctor")) {
         await runDoctor();
+        return;
+    }
+    if (args.includes("--stealth-audit")) {
+        await runStealthAudit({
+            localOnly: args.includes("--local-only"),
+            full: args.includes("--full"),
+            json: args.includes("--json"),
+            headed: args.includes("--headed"),
+        });
         return;
     }
     const transport = new StdioServerTransport();

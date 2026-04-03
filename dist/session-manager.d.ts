@@ -1,3 +1,4 @@
+import type { Page } from "playwright-core";
 import type { Session, SessionCreateOptions, SessionInfo, SessionManagerConfig, ISessionManager, PoolStats } from "./types.js";
 export declare class SessionManager implements ISessionManager {
     private readonly config;
@@ -17,7 +18,23 @@ export declare class SessionManager implements ISessionManager {
     destroyAll(): Promise<void>;
     listSessions(): SessionInfo[];
     getStats(): PoolStats;
+    getClientSessionCount(clientId: string): number;
     getSessions(): Map<string, Session>;
+    /**
+     * Rotate a session: destroy the old one and create a fresh session with
+     * a new fingerprint and humanization enabled. Used by stealth escalation
+     * when a site blocks the current session.
+     *
+     * Returns the new session and its active page, plus the URL the old session
+     * was on (so the caller can navigate back).
+     *
+     * SAFETY: Never call this on profile/auth sessions — the caller must guard.
+     */
+    rotateSession(oldSessionId: string): Promise<{
+        session: Session;
+        page: Page;
+        previousUrl: string;
+    }>;
     getResourceUsage(): {
         heapUsedMB: number;
         rssMB: number;

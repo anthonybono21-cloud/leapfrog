@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-04-03
+
+### Bug Fixes
+
+- **P0: Paginate extractTarget timeout** — `extractContent()` now wraps locator operations in `Promise.race` with 5s cap and uses `.first()` to avoid strict-mode ambiguity. Previously used Playwright's 30s default timeout, causing silent hangs on valid selectors.
+- **P1: Export duplicate steps** — `exportSession()` now deduplicates consecutive identical steps (same tool + action + target + value). Both `recordToolCall` and `analyzePostAction` were firing for the same act call, producing double entries.
+- **P1: @eN refs not resolved in export** — `refMap` no longer cleared on snapshot or navigation. Refs accumulate across snapshots (refCounter always increments, no key collisions). `navGeneration` still handles stale-ref detection for the act tool. Export can now resolve historical @eN refs to stable CSS selectors.
+
+---
+
 ## [0.5.0] - 2026-04-03
 
 ### Bug Fixes

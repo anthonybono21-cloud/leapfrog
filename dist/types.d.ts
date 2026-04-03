@@ -1,4 +1,5 @@
-import type { BrowserContext, Page } from "playwright";
+import type { BrowserContext, Page } from "playwright-core";
+import type { ApiCapture } from "./api-intelligence.js";
 export interface NetworkEntry {
     timestamp: number;
     method: string;
@@ -40,12 +41,24 @@ export interface Session {
     /** Map from @eN ref string to Playwright locator selector */
     refMap: Map<string, string>;
     profilePath?: string;
+    /** Profile shorthand name used to create this session (e.g. "github"). Used for auto-saving storageState on destroy. */
+    profileName?: string;
+    /** Client identifier for per-client pool partitioning */
+    clientId?: string;
     /** Ring buffer of captured network responses (max 200). Initialized by NetworkIntelligence.attachToPage(). */
     networkLog?: NetworkEntry[];
     /** Ring buffer of captured console messages (max 100). Initialized by NetworkIntelligence.attachToPage(). */
     consoleLog?: ConsoleEntry[];
     /** Active intercept rules for this session. Initialized by NetworkIntelligence.attachToPage(). */
     interceptRules?: NetworkInterceptRule[];
+    /** Captured API calls for this session. Managed by ApiIntelligence. */
+    apiCaptures?: ApiCapture[];
+    /** Whether this session is connected via CDP (don't kill browser on destroy). */
+    cdpConnected?: boolean;
+    /** Increments on every navigation (URL change via navigate tool). Used for stale-ref detection. */
+    navGeneration?: number;
+    /** The navGeneration value at the time of the last snapshot. Refs are stale when navGeneration > refNavGeneration. */
+    refNavGeneration?: number;
 }
 export interface SessionCreateOptions {
     /** Mount a Chrome user-data-dir for pre-authenticated profiles */
@@ -88,6 +101,16 @@ export interface SessionCreateOptions {
         /** Comma-separated domains to bypass proxy (e.g. "*.example.com,chromium.org") */
         bypass?: string;
     };
+    /** Profile shorthand name (e.g. "github", "gmail"). Resolves to ~/.leapfrog/chrome-profiles/{name}/ */
+    profile?: string;
+    /** Client identifier for per-client pool partitioning (used with LEAP_MAX_SESSIONS_PER_CLIENT) */
+    clientId?: string;
+    /** Per-session headed mode override. When true, browser runs with visible UI. */
+    headed?: boolean;
+    /** Paths to unpacked Chrome extensions to load */
+    extensions?: string[];
+    /** CDP endpoint URL to connect to instead of launching a new browser */
+    cdp?: string;
 }
 export interface ISessionManager {
     createSession(opts?: SessionCreateOptions): Promise<Session>;
@@ -97,6 +120,7 @@ export interface ISessionManager {
     destroyAll(): Promise<void>;
     listSessions(): SessionInfo[];
     getStats(): PoolStats;
+    getClientSessionCount(clientId: string): number;
 }
 export interface SessionInfo {
     id: string;

@@ -569,8 +569,9 @@ server.registerTool(
       const page = getPage(session);
 
       // Bump nav generation — any refs from before this navigation are now stale
+      // (navGeneration check in act handler prevents using stale refs)
+      // Don't clear refMap — historical refs needed for session_export resolution
       session.navGeneration = (session.navGeneration ?? 0) + 1;
-      session.refMap.clear();
       // Reset API captures for the new page
       ApiIntelligence.clearSession(sessionId);
 

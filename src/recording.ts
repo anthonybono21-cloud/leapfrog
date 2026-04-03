@@ -414,10 +414,30 @@ export function exportSession(
     }
   }
 
+  // ── Step 2b: Deduplicate consecutive identical steps ────────────────
+  // Both recordToolCall and analyzePostAction fire for the same act call,
+  // producing duplicate entries. Remove consecutive steps with matching
+  // tool + action + target + value.
+  const deduped: RecordingStep[] = [];
+  for (const step of steps) {
+    const prev = deduped[deduped.length - 1];
+    if (
+      prev &&
+      prev.tool === step.tool &&
+      prev.args.action === step.args.action &&
+      prev.args.target === step.args.target &&
+      prev.args.value === step.args.value &&
+      prev.args.key === step.args.key
+    ) {
+      continue; // Skip duplicate
+    }
+    deduped.push(step);
+  }
+
   // ── Step 3: Auto-detect parameters ────────────────────────────────────
 
-  const detections = detectParams(steps);
-  const parameterizedSteps = applyParams(steps, detections);
+  const detections = detectParams(deduped);
+  const parameterizedSteps = applyParams(deduped, detections);
 
   const paramDefs: Record<string, RecordingParam> = {};
   for (const d of detections) {

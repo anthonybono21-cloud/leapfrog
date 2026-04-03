@@ -268,8 +268,10 @@ export class SnapshotEngine implements ISnapshotEngine {
     const maxDepth = opts?.maxDepth ?? 20;
     const maxChars = opts?.maxChars ?? 0;
 
-    // Reset ref map (counter keeps incrementing across snapshots)
-    session.refMap.clear();
+    // Don't clear refMap — refs accumulate across snapshots so that
+    // session_export can resolve historical @eN refs to stable selectors.
+    // refCounter always increments, so there are no key collisions.
+    // navGeneration handles stale-ref detection for the act tool.
 
     let yaml: string;
     try {

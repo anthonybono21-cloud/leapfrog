@@ -120,7 +120,12 @@ async function extractContent(
     }
     case "html": {
       if (opts.extractTarget) {
-        result = await page.locator(opts.extractTarget).innerHTML();
+        result = await Promise.race([
+          page.locator(opts.extractTarget).first().innerHTML(),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`extractTarget "${opts.extractTarget}" timed out (5s)`)), 5_000),
+          ),
+        ]);
       } else {
         result = await page.content();
       }
@@ -129,11 +134,16 @@ async function extractContent(
     case "text":
     default: {
       if (opts.extractTarget) {
-        result = await page.locator(opts.extractTarget).evaluate((node: Element) => {
-          const clone = node.cloneNode(true) as Element;
-          clone.querySelectorAll('script, style, noscript, template, [hidden], [aria-hidden="true"]').forEach(e => e.remove());
-          return (clone as HTMLElement).innerText?.trim() ?? clone.textContent?.trim() ?? "";
-        });
+        result = await Promise.race([
+          page.locator(opts.extractTarget).first().evaluate((node: Element) => {
+            const clone = node.cloneNode(true) as Element;
+            clone.querySelectorAll('script, style, noscript, template, [hidden], [aria-hidden="true"]').forEach(e => e.remove());
+            return (clone as HTMLElement).innerText?.trim() ?? clone.textContent?.trim() ?? "";
+          }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`extractTarget "${opts.extractTarget}" timed out (5s)`)), 5_000),
+          ),
+        ]);
       } else {
         result = await page.evaluate(() => {
           const clone = document.body.cloneNode(true) as HTMLElement;

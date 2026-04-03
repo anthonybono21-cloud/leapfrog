@@ -1,4 +1,4 @@
-import { chromium } from "playwright";
+import { chromium } from "playwright-core";
 import { stealth } from "./stealth.js";
 import { crashRecovery } from "./crash-recovery.js";
 import { networkIntelligence } from "./network-intelligence.js";
@@ -6,6 +6,10 @@ import { tabManager } from "./tab-manager.js";
 import { logger } from "./logger.js";
 import { generateFingerprint } from "./humanize-fingerprint.js";
 import { isHumanizeEnabled } from "./humanize-utils.js";
+import { CdpConnector } from "./cdp-connector.js";
+import * as fs from "fs/promises";
+import * as path from "path";
+import * as os from "os";
 const DEFAULT_CONFIG = {
     maxSessions: 10,
     idleTimeoutMs: 30 * 60 * 1000,
@@ -13,6 +17,19 @@ const DEFAULT_CONFIG = {
     defaultViewport: { width: 1280, height: 720 },
     headless: true,
 };
+// ── New env vars for v0.4.0 ────────────────────────────────────────────
+const LEAP_HEADED = process.env.LEAP_HEADED === "true";
+const LEAP_EXTENSIONS = process.env.LEAP_EXTENSIONS
+    ? process.env.LEAP_EXTENSIONS.split(",").map((p) => p.trim()).filter(Boolean)
+    : [];
+const LEAP_PROFILES_DIR = process.env.LEAP_PROFILES_DIR ??
+    path.join(os.homedir(), ".leapfrog", "chrome-profiles");
+const LEAP_CDP_ENDPOINT = process.env.LEAP_CDP_ENDPOINT;
+const LEAP_MAX_SESSIONS_PER_CLIENT = process.env.LEAP_MAX_SESSIONS_PER_CLIENT
+    ? parseInt(process.env.LEAP_MAX_SESSIONS_PER_CLIENT, 10)
+    : undefined;
+const LEAP_STORAGE_PROFILES_DIR = process.env.LEAP_STORAGE_PROFILES_DIR ??
+    path.join(os.homedir(), ".leapfrog", "profiles");
 function generateId() {
     const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
     let result = "s_";
@@ -128,18 +145,147 @@ export class SessionManager {
             throw new Error(`Session pool full (${this.config.maxSessions}/${this.config.maxSessions}). ` +
                 `Destroy an existing session first.`);
         }
-        const browser = await this.ensureBrowser();
+        // ── Per-client session limit ────────────────────────────────────
+        if (opts?.clientId && LEAP_MAX_SESSIONS_PER_CLIENT !== undefined) {
+            const clientCount = this.getClientSessionCount(opts.clientId);
+            if (clientCount >= LEAP_MAX_SESSIONS_PER_CLIENT) {
+                throw new Error(`Client session limit reached (${LEAP_MAX_SESSIONS_PER_CLIENT}/${LEAP_MAX_SESSIONS_PER_CLIENT}). ` +
+                    `Client "${opts.clientId}" must destroy an existing session first.`);
+            }
+        }
+        // ── Resolve headed mode: per-session > env > config ─────────────
+        const isHeaded = opts?.headed !== undefined
+            ? opts.headed
+            : LEAP_HEADED
+                ? true
+                : !this.config.headless;
+        // ── CDP connect mode ────────────────────────────────────────────
+        const cdpEndpoint = opts?.cdp ?? LEAP_CDP_ENDPOINT;
+        let cdpConnected = false;
+        let browser;
+        let context;
+        let usePersistentProfile = false;
+        if (cdpEndpoint) {
+            // CDP mode: attach to running Chrome, don't launch
+            browser = await CdpConnector.connect(cdpEndpoint);
+            cdpConnected = true;
+            // Use the first existing context, or create a new one
+            const contexts = browser.contexts();
+            context = contexts.length > 0 ? contexts[0] : await browser.newContext();
+            logger.info("session.cdp_connected", { endpoint: cdpEndpoint });
+        }
+        else if (opts?.profile) {
+            // ── Profile shorthand mode ──────────────────────────────────
+            const safeName = opts.profile.replace(/[^a-zA-Z0-9_-]/g, "");
+            if (!safeName)
+                throw new Error("Invalid profile name.");
+            const profileDir = path.join(LEAP_PROFILES_DIR, safeName);
+            // Check if profile exists
+            let profileExists = false;
+            try {
+                await fs.access(profileDir);
+                profileExists = true;
+            }
+            catch {
+                // New profile — create the directory
+                await fs.mkdir(profileDir, { recursive: true, mode: 0o700 });
+            }
+            // If profile is new, default to headed so user can log in
+            const profileHeaded = opts.headed !== undefined
+                ? opts.headed
+                : profileExists
+                    ? isHeaded
+                    : true;
+            // Merge extensions from env + opts
+            const allExtensions = [...LEAP_EXTENSIONS, ...(opts?.extensions ?? [])];
+            // Build launch args
+            const launchArgs = [];
+            if (stealth.isEnabled()) {
+                launchArgs.push(...stealth.getLaunchArgs());
+            }
+            if (allExtensions.length > 0) {
+                // Validate each extension path has manifest.json
+                for (const extPath of allExtensions) {
+                    try {
+                        await fs.access(path.join(extPath, "manifest.json"));
+                    }
+                    catch {
+                        throw new Error(`Extension missing manifest.json: ${extPath}`);
+                    }
+                }
+                launchArgs.push(`--load-extension=${allExtensions.join(",")}`);
+                launchArgs.push(`--disable-extensions-except=${allExtensions.join(",")}`);
+                // Force new headless mode when headless with extensions
+                if (!profileHeaded) {
+                    launchArgs.push("--headless=new");
+                }
+            }
+            // Check for saved cookie state JSON
+            const profileStatePath = path.join(LEAP_STORAGE_PROFILES_DIR, `${safeName}.json`);
+            let savedCookieState;
+            try {
+                await fs.access(profileStatePath);
+                const raw = await fs.readFile(profileStatePath, "utf-8");
+                savedCookieState = JSON.parse(raw);
+            }
+            catch {
+                // No saved state — start fresh
+            }
+            // FIX: Do NOT pass storageState to launchPersistentContext.
+            // storageState + persistent context conflict: storageState overwrites
+            // Chrome-native cookies with potentially empty Playwright-captured state.
+            // Instead, launch clean and inject cookies after.
+            context = await chromium.launchPersistentContext(profileDir, {
+                headless: !profileHeaded,
+                viewport: opts?.viewport ?? this.config.defaultViewport,
+                args: launchArgs.length > 0 ? launchArgs : undefined,
+                ...(this.config.channel ? { channel: this.config.channel } : {}),
+            });
+            // Restore saved cookies AFTER context is created
+            if (savedCookieState?.cookies?.length) {
+                try {
+                    await context.addCookies(savedCookieState.cookies);
+                    logger.info("session.cookies_restored", { profile: safeName, count: savedCookieState.cookies.length });
+                }
+                catch (e) {
+                    logger.error("session.cookie_restore_failed", { profile: safeName, error: e.message });
+                }
+            }
+            browser = context.browser();
+            usePersistentProfile = true;
+            logger.info("session.persistent_profile", { profile: safeName, profileDir, headed: profileHeaded, isNew: !profileExists, restoredCookies: savedCookieState?.cookies?.length ?? 0 });
+        }
+        else if (isHeaded && this.config.headless) {
+            // ── Headed override on a headless server ─────────────────────
+            // Can't reuse the shared headless browser — launch a separate headed one
+            const launchArgs = [];
+            if (stealth.isEnabled()) {
+                launchArgs.push(...stealth.getLaunchArgs());
+            }
+            browser = await chromium.launch({
+                headless: false,
+                ...(this.config.channel ? { channel: this.config.channel } : {}),
+                ...(launchArgs.length > 0 ? { args: launchArgs } : {}),
+            });
+            logger.info("browser.launched_headed_override", { channel: this.config.channel ?? "bundled" });
+        }
+        else {
+            // ── Standard mode ─────────────────────────────────────────────
+            browser = await this.ensureBrowser();
+        }
         const viewport = opts?.viewport ?? this.config.defaultViewport;
         // Determine if stealth applies: per-session flag overrides global env
         const useStealth = opts?.stealth !== undefined ? opts.stealth : stealth.isEnabled();
-        // Build context options — merge stealth defaults
-        const stealthOpts = useStealth ? stealth.getContextOptions(opts?.userAgent) : {};
+        // Always generate a per-session fingerprint for stealth (WebGL, device props, PRNG seed).
+        // When LEAP_HUMANIZE is enabled, it also controls UA/viewport/locale/timezone.
+        const fp = generateFingerprint();
+        // Build context options — merge stealth defaults with fingerprint for Sec-CH-UA sync (Phase 2.4)
+        const stealthOpts = useStealth ? stealth.getContextOptions(opts?.userAgent, fp) : {};
         const contextOpts = { viewport, ...stealthOpts };
         // Apply humanized fingerprint when LEAP_HUMANIZE is enabled.
         // Fingerprint provides coherent browser identity (UA, viewport, locale, timezone, etc.)
         // that can be overridden by explicit user opts below.
         if (isHumanizeEnabled()) {
-            const fp = generateFingerprint();
             if (!opts?.userAgent) {
                 contextOpts.userAgent = fp.userAgent;
             }
@@ -195,12 +341,21 @@ export class SessionManager {
         // Extract fingerprint before passing opts to Playwright (not a Playwright option)
         const humanizeFingerprint = contextOpts._humanizeFingerprint;
         delete contextOpts._humanizeFingerprint;
-        const context = await browser.newContext(contextOpts);
-        const page = await context.newPage();
+        // For CDP or persistent profile, context is already created above.
+        // For standard mode, create a new context on the shared browser.
+        if (!cdpConnected && !usePersistentProfile) {
+            context = await browser.newContext(contextOpts);
+        }
+        // At this point context is always assigned (CDP, profile, or standard mode)
+        const ctx = context;
+        const page = usePersistentProfile
+            ? (ctx.pages()[0] ?? await ctx.newPage())
+            : await ctx.newPage();
         // Apply stealth init scripts to evade bot detection
-        // Pass userAgent so platform inference (P2 #9) matches the UA string
+        // Pass userAgent for platform inference (P2 #9) and fingerprint for
+        // per-session WebGL/device/PRNG values (Phase 2.1-2.5)
         if (useStealth) {
-            await stealth.applyToPage(page, opts?.userAgent);
+            await stealth.applyToPage(page, opts?.userAgent, fp);
         }
         // Apply humanized fingerprint overrides (navigator, screen, WebGL properties)
         if (humanizeFingerprint) {
@@ -249,12 +404,12 @@ export class SessionManager {
         });
         // BUG-009: Handle page crashes — mark session as unhealthy and attempt recovery
         page.on("crash", () => {
-            logger.error("page.crashed", { contextId: context.constructor.name });
+            logger.error("page.crashed", { contextId: ctx.constructor.name });
             // Attempt to create a replacement page in the same context
-            context.newPage().then((newPage) => {
+            ctx.newPage().then((newPage) => {
                 // Find the session that owns this context
                 for (const [, s] of this.sessions) {
-                    if (s.context === context) {
+                    if (s.context === ctx) {
                         s.page = newPage;
                         // Replace crashed page in pages array if tab manager initialized it
                         if (s.pages) {
@@ -281,7 +436,7 @@ export class SessionManager {
             }).catch(() => {
                 // Context itself may be dead — mark session for cleanup
                 for (const [id, s] of this.sessions) {
-                    if (s.context === context) {
+                    if (s.context === ctx) {
                         logger.error("page.crash_recovery_failed", { id });
                         this.sessions.delete(id);
                         networkIntelligence.cleanupSession(id);
@@ -298,20 +453,25 @@ export class SessionManager {
         const now = Date.now();
         const session = {
             id,
-            context,
+            context: ctx,
             page,
             createdAt: now,
             lastUsedAt: now,
             refCounter: 0,
             refMap: new Map(),
+            navGeneration: 0,
+            refNavGeneration: 0,
             profilePath: opts?.profilePath,
+            ...(opts?.profile ? { profileName: opts.profile.replace(/[^a-zA-Z0-9_-]/g, "") } : {}),
+            ...(opts?.clientId ? { clientId: opts.clientId } : {}),
+            ...(cdpConnected ? { cdpConnected: true } : {}),
         };
         this.sessions.set(id, session);
         this.totalCreated++;
         // Wire up network intelligence (auto-capture requests + console)
         networkIntelligence.attachToPage(page, session);
         // Wire up tab manager (auto-track new tabs/popups)
-        tabManager.attachToContext(context, session);
+        tabManager.attachToContext(ctx, session);
         logger.info("session.created", { id, profilePath: opts?.profilePath });
         return session;
     }
@@ -331,13 +491,43 @@ export class SessionManager {
         }
         this.sessions.delete(id);
         networkIntelligence.cleanupSession(id);
+        // ── Auto-save cookies for profile sessions ──────────────────────
+        // FIX: Use context.cookies() instead of context.storageState().
+        // storageState() on persistent contexts returns empty cookies because
+        // it only captures Playwright-injected cookies, not browser-native ones
+        // set via navigation/HTTP headers. context.cookies() captures ALL cookies.
+        if (session.profileName) {
+            try {
+                await fs.mkdir(LEAP_STORAGE_PROFILES_DIR, { recursive: true, mode: 0o700 });
+                const profileStatePath = path.join(LEAP_STORAGE_PROFILES_DIR, `${session.profileName}.json`);
+                const cookies = await session.context.cookies();
+                const state = { cookies, origins: [] };
+                await fs.writeFile(profileStatePath, JSON.stringify(state, null, 2), { mode: 0o600 });
+                logger.info("session.profile_state_saved", { id, profile: session.profileName, path: profileStatePath, cookieCount: cookies.length });
+            }
+            catch (e) {
+                // Non-fatal — log and continue with destroy
+                logger.error("session.profile_state_save_failed", { id, profile: session.profileName, error: e.message });
+            }
+        }
         try {
-            await session.context.close();
+            // For CDP-connected sessions, only close pages we opened — don't kill the external browser
+            if (session.cdpConnected) {
+                for (const p of session.context.pages()) {
+                    try {
+                        await p.close();
+                    }
+                    catch { /* page may already be closed */ }
+                }
+            }
+            else {
+                await session.context.close();
+            }
         }
         catch {
             // Context may already be closed (browser crash, manual close) — safe to ignore
         }
-        logger.info("session.destroyed", { id });
+        logger.info("session.destroyed", { id, cdp: !!session.cdpConnected });
     }
     async destroyAll() {
         // Destroy all sessions first (closes contexts)
@@ -383,8 +573,58 @@ export class SessionManager {
             totalCreated: this.totalCreated,
         };
     }
+    getClientSessionCount(clientId) {
+        let count = 0;
+        for (const session of this.sessions.values()) {
+            if (session.clientId === clientId) {
+                count++;
+            }
+        }
+        return count;
+    }
     getSessions() {
         return this.sessions;
+    }
+    /**
+     * Rotate a session: destroy the old one and create a fresh session with
+     * a new fingerprint and humanization enabled. Used by stealth escalation
+     * when a site blocks the current session.
+     *
+     * Returns the new session and its active page, plus the URL the old session
+     * was on (so the caller can navigate back).
+     *
+     * SAFETY: Never call this on profile/auth sessions — the caller must guard.
+     */
+    async rotateSession(oldSessionId) {
+        const oldSession = this.sessions.get(oldSessionId);
+        if (!oldSession) {
+            throw new Error(`Cannot rotate session "${oldSessionId}" — not found.`);
+        }
+        // Capture the URL we'll want to navigate back to
+        let previousUrl = "about:blank";
+        try {
+            previousUrl = oldSession.page.url();
+        }
+        catch {
+            /* page may be crashed */
+        }
+        // Preserve client ID for pool accounting
+        const clientId = oldSession.clientId;
+        // Destroy old session (saves profile state if applicable)
+        await this.destroySession(oldSessionId);
+        // Create fresh session with humanization enabled via env
+        // The new session automatically gets a fresh fingerprint via generateFingerprint()
+        const newSession = await this.createSession({
+            stealth: true,
+            clientId,
+        });
+        const page = tabManager.getActivePage(newSession);
+        logger.info("session.rotated", {
+            oldId: oldSessionId,
+            newId: newSession.id,
+            previousUrl,
+        });
+        return { session: newSession, page, previousUrl };
     }
     getResourceUsage() {
         const mem = process.memoryUsage();
