@@ -267,10 +267,10 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 ## Tests
 
 ```
- 442 passing across 19 suites
+ 537 passing across 20 suites
 ```
 
-Session management, snapshot engine, network intelligence, tab management, security, stealth patches (19), humanization (mouse, typing, scroll), page classification, harness intelligence, API intelligence, script executor, extended actions, bug regression, stress tests, benchmarks.
+Session management, snapshot engine, network intelligence, tab management, security, SSRF protection, stealth patches (19), humanization (mouse, typing, scroll), page classification, harness intelligence, API intelligence, script executor, extended actions, bug regression, stress tests, benchmarks.
 
 ```bash
 npm test
