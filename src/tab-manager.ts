@@ -1,4 +1,4 @@
-import type { BrowserContext, Page } from "playwright";
+import type { BrowserContext, Page } from "playwright-core";
 import type { Session, TabInfo, WaitCondition } from "./types.js";
 import { stealth } from "./stealth.js";
 
@@ -246,18 +246,23 @@ export class TabManager {
       MAX_WAIT_TIMEOUT
     );
 
-    // Resolve @eN refs to selectors
+    // Resolve @eN refs to selectors (with stale-ref detection)
     const resolveTarget = (ref: string): string => {
       if (ref.startsWith("@e")) {
+        if ((session.navGeneration ?? 0) > (session.refNavGeneration ?? 0)) {
+          throw new Error(
+            `Ref ${ref} is stale — the page has navigated since the last snapshot. Take a new snapshot to get updated refs.`,
+          );
+        }
         const selector = session.refMap.get(ref);
         if (!selector) {
           throw new Error(
-            `Ref ${ref} not found. Take a fresh snapshot first.`
+            `Ref ${ref} not found. Take a fresh snapshot first.`,
           );
         }
         return selector;
       }
-      return ref;
+      return ref; // CSS selectors don't go stale
     };
 
     switch (condition.type) {

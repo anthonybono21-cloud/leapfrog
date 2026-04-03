@@ -18,7 +18,7 @@
 //
 // Standalone module — no cross-dependencies on other humanize modules.
 
-import type { Page } from "playwright";
+import type { Page } from "playwright-core";
 import { humanDelay, logNormalDelay, sleep, isHumanizeEnabled } from "./humanize-utils.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────

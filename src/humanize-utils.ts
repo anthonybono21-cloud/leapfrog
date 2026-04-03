@@ -70,6 +70,15 @@ export function logNormalDelay(median: number, sigma: number, floor = 40): numbe
 }
 
 /**
+ * Generate a normally-distributed random value with the given mean and stddev.
+ * Convenience alias for gaussianRandom — named to match the spec convention
+ * used across humanize modules (e.g., `normalRandom(350, 100)`).
+ */
+export function normalRandom(mean: number, stddev: number): number {
+  return gaussianRandom(mean, stddev);
+}
+
+/**
  * Check whether the LEAP_HUMANIZE env var is enabled.
  * Returns false unless LEAP_HUMANIZE is explicitly set to "true" or "1".
  */

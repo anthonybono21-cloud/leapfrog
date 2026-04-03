@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">Leapfrog</h1>
-<p align="center"><strong>Multi-session browser MCP for AI agents.</strong><br/>21 tools. 15 parallel sessions. Stealth. Humanization. Up to 10x fewer tokens.</p>
+<p align="center"><strong>Multi-session browser MCP for AI agents.</strong><br/>27 tools. 15 parallel sessions. Stealth. Humanization. Up to 10x fewer tokens.</p>
 
 <p align="center">
 <code>npm i leapfrog</code>&nbsp;&nbsp;|&nbsp;&nbsp;Works with Claude Code, Cursor, Windsurf
@@ -51,7 +51,9 @@ Add to `~/.mcp.json` (Claude Code) or your editor's MCP config:
 }
 ```
 
-Chromium installs automatically. If it fails: `npx playwright install chromium`
+Leapfrog uses `playwright-core` (15MB) instead of `playwright` (1.6GB) and does **not** bundle a browser. Either:
+- Set `LEAP_CHANNEL=chrome` to use your installed Chrome/Chromium
+- Or run `npx playwright-core install chromium` to install the bundled Chromium binary
 
 ## Feature Matrix
 
@@ -72,11 +74,15 @@ Chromium installs automatically. If it fails: `npx playwright install chromium`
 | Per-session proxy | Yes | No | No |
 | Humanization (opt-in) | Yes | No | No |
 | Auth profile reuse | Yes | No | No |
+| Cookie persistence | Yes | No | No |
+| Page classification (18) | Yes | No | No |
+| Session memory | Yes | No | No |
+| API intelligence | Yes | No | No |
 | SSRF protection | Yes | No | No |
 
 ## Stealth
 
-Leapfrog ships 14 anti-detection patches enabled by default (`LEAP_STEALTH=true`). These cover the vectors that fingerprint services like CreepJS and fingerprint-pro actually check:
+Leapfrog ships 19 anti-detection patches enabled by default (`LEAP_STEALTH=true`). These cover the vectors that fingerprint services like CreepJS and fingerprint-pro actually check:
 
 - Client Hints brands (strips HeadlessChrome)
 - `navigator.webdriver` forced to `undefined`
@@ -92,6 +98,11 @@ Leapfrog ships 14 anti-detection patches enabled by default (`LEAP_STEALTH=true`
 - `document.hasFocus()` override
 - Source URL comment stripping
 - Custom UA + stealth coexistence (custom user agents no longer disable stealth context)
+- CDP `Runtime.enable` detection (`Error.prepareStackTrace` filter)
+- Permissions API spoofing (20+ permission types)
+- AudioContext fingerprint noise (`getChannelData`/`getFloatFrequencyData`)
+- WebRTC IP leak prevention (ICE candidate filtering)
+- Font enumeration fingerprint spoofing
 
 Per-session stealth control: pass `stealth: false` in `session_create` to disable for a specific session.
 
@@ -105,6 +116,31 @@ Set `LEAP_HUMANIZE=true` to enable human-like browser interaction. This is opt-i
 - **Pause** — Inter-action "think" delays that simulate cognitive gaps between actions
 - **Fingerprint** — Coherent browser fingerprint generation (platform, device memory, GPU, timezone)
 - **Utils** — Shared math primitives (Box-Muller gaussian, distributions)
+
+## Page Classification
+
+Every `navigate` and `snapshot` call automatically classifies the page type using weighted signal scoring (no LLM required). 18 types:
+
+`login` · `search-results` · `product` · `product-list` · `checkout` · `article` · `dashboard` · `form` · `error` · `challenge` · `landing` · `documentation` · `profile` · `media` · `feed` · `qa` · `ecommerce` · `unknown`
+
+Classification drives smarter snapshot extraction — login pages surface form fields, articles surface content, dashboards surface interactive elements.
+
+## Harness Intelligence
+
+The harness tracks every action in a session and classifies outcomes:
+
+- **Action outcome classification** — `SUCCESS`, `SILENT_CLICK`, `NAVIGATION`, `WRONG_ELEMENT`, `BLOCKED`, `ERROR`, `PENDING`
+- **Bot redirect detection** — detects when a site redirects to a challenge or block page after an action
+- **Loop detection** — warns when the agent is stuck clicking the same element, ping-ponging between URLs, or repeating actions
+- **Session memory** — `session_memory` tool recalls actions after context window compression
+
+## Cookie Persistence
+
+Persistent browser profiles now use `context.cookies()` + `addCookies()` instead of `storageState()`, which returns empty on persistent contexts. Auth state survives across sessions.
+
+## SSRF Hardening
+
+URL validation blocks hex-encoded IPs (`0x7f000001`), octal notation (`0177.0.0.1`), CGNAT ranges (`100.64.0.0/10`), and redirect chains that resolve to internal addresses.
 
 ## The Ecosystem
 
@@ -120,9 +156,9 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | Console errors | **Croak** | Something went wrong in the browser |
 | Stealth mode | **Camouflage** | Anti-bot evasion patches |
 
-## All 21 Tools
+## All 27 Tools
 
-### Pond Management (7)
+### Pond Management (9)
 
 | Tool | What it does |
 |---|---|
@@ -133,8 +169,10 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | `session_list_profiles` | List saved auth profiles |
 | `pool_status` | Pool stats, memory, uptime |
 | `session_health` | Is the pond healthy? Browser connected, page responsive? |
+| `profile_list` | List saved persistent browser profiles |
+| `profile_delete` | Delete a saved persistent browser profile and its data |
 
-### Navigation & Snapshots (8)
+### Navigation & Snapshots (9)
 
 | Tool | What it does |
 |---|---|
@@ -146,6 +184,7 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | `wait_for` | Wait for element / text / network idle / navigation / JS expression |
 | `screenshot` | Capture PNG (full page or element) |
 | `extract` | Pull text, HTML, title, URL, or evaluate JS |
+| `session_memory` | Recall actions performed in this session — recovers context after compression |
 
 ### Tab Management (3)
 
@@ -155,13 +194,16 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | `tab_switch` | Hop to another pad (-1 for most recent popup) |
 | `tab_close` | Close a pad (can't close the last one) |
 
-### Network Intelligence (3)
+### Network & API Intelligence (6)
 
 | Tool | What it does |
 |---|---|
 | `network_log` | See HTTP traffic — filter by URL, method, status, content-type |
 | `console_log` | Read browser console output, filtered by level |
 | `network_intercept` | Block, mock, or log requests by URL pattern |
+| `api_discover` | List JSON APIs the page has called, classified by category (data, tracking, auth, cdn, ads) |
+| `api_export` | Generate an OpenAPI v3 spec from observed API traffic |
+| `execute` | Run a Playwright script in a sandboxed environment — replaces 5-20 sequential MCP round trips |
 
 ## Environment Variables
 
@@ -172,17 +214,19 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | `LEAP_HEADLESS` | `true` | Set `false` to watch the browser |
 | `LEAP_CHANNEL` | _(bundled chromium)_ | Set `chrome` to use your installed Chrome |
 | `LEAP_ALLOW_JS` | `true` | Allow JS evaluation in `extract` and `wait_for` |
-| `LEAP_STEALTH` | `true` | Stealth mode (anti-bot evasion) — 14 patches |
+| `LEAP_STEALTH` | `true` | Stealth mode (anti-bot evasion) — 19 patches |
 | `LEAP_HUMANIZE` | `false` | Experimental. Human-like mouse movement, typing cadence, and scroll behavior. |
+| `LEAP_ALLOW_EXECUTE` | `true` | Allow the `execute` tool (sandboxed Playwright scripts) |
+| `LEAP_PROFILES_DIR` | `~/.leapfrog/chrome-profiles` | Directory for persistent browser profiles |
 | `LEAP_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 
 ## Tests
 
 ```
- 237 passing across 13 suites
+ 442 passing across 19 suites
 ```
 
-Session management, snapshot engine, network intelligence, tab management, security, stealth patches, humanization (mouse, typing, scroll), extended actions, bug regression, stress tests, benchmarks.
+Session management, snapshot engine, network intelligence, tab management, security, stealth patches (19), humanization (mouse, typing, scroll), page classification, harness intelligence, API intelligence, script executor, extended actions, bug regression, stress tests, benchmarks.
 
 ```bash
 npm test
@@ -191,7 +235,7 @@ npm test
 ## Requirements
 
 - Node.js >= 20
-- Chromium (auto-installed via Playwright)
+- Chromium — use system Chrome (`LEAP_CHANNEL=chrome`) or install via `npx playwright-core install chromium`
 
 ## License
 

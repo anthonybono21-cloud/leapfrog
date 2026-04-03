@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-04-03
+
+### Bug Fixes
+
+- **Cookie persistence** — replaced `storageState()` with `cookies()`/`addCookies()` for persistent contexts (storageState returns empty on persistent contexts)
+- **webdriver stealth** — triple-delete from prototype + `Navigator.prototype` + navigator instance, plus post-navigation `framenavigated` cleanup
+- **@eN ref try/finally** — refs always restored even on snapshot exception
+- **holdDuration crash** — try/catch guard prevents session crash on missing elements
+- **BLOCKED classifier** — signal hierarchy rewrite (CAPTCHA widgets > challenge titles > keywords; hard negative at >50 elements)
+
+### Stealth & Anti-Detection
+
+- CDP stealth default ON
+- Playwright globals cleanup (`__pwInitScripts`, `__playwright`)
+- sourceURL sanitization
+- WebGL per-session from fingerprint (9 GPU models)
+- Canvas + AudioContext session-seeded PRNG (deterministic per session)
+- Sec-CH-UA HTTP headers synced to fingerprint
+- Device properties derived from fingerprint
+
+### Humanization
+
+- **Mouse** — origin fix (was hardcoded 0,0), asymmetric velocity (40% accel / 60% decel), overshoot/correction (distance-based 10%/25%/40%), per-session motor profiles, idle cursor drift (sine-wave micro-movements)
+- **Timing** — post-navigation settling (500ms min, 1.5s median), content-aware dwell time (238 WPM floor), form-fill timing (60% Tab / 40% click)
+- **Scroll** — variable amounts, read-pause cycles, overshoot, cursor correlation
+
+### Intelligence
+
+- **SSRF hardened** — hex IP parser, CGNAT `100.64.0.0/10`, benchmarking `198.18.0.0/15`, redirect chain interception after `page.goto`
+- **Page classifier** — 18 types including feed (Reddit/HN), qa (SO/SE), ecommerce (Amazon/eBay) with repeated sibling detection
+- **Harness intelligence** — BLOCKED signal hierarchy, SILENT_CLICK (30 ARIA roles), bot redirect detection (tldts eTLD+1)
+- **Session memory hooks** — 17 `recordToolCall` calls across all tools (extract, wait_for, tab_switch, tab_close, add_init_script, network_intercept, act, screenshot)
+- **Crash recovery** — page crash auto-recover + telemetry
+- **Stack trace sanitization**
+
+### Testing
+
+- **442 unit tests**, 84-test stress test suite (9/9 re-verified failures now pass)
+
+---
+
 ## [0.3.0] - 2026-04-02
 
 ### Bug Fixes

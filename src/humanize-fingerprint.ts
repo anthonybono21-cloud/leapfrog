@@ -162,9 +162,9 @@ export function generateFingerprint(opts: FingerprintOptions = {}): Fingerprint 
 
   // Browser version ranges (realistic as of early 2026)
   const versions: Record<string, { min: number; max: number }> = {
-    chrome:  { min: 120, max: 132 },
-    firefox: { min: 120, max: 128 },
-    edge:    { min: 120, max: 132 },
+    chrome:  { min: 124, max: 136 },
+    firefox: { min: 124, max: 132 },
+    edge:    { min: 124, max: 136 },
   };
   const vRange = versions[family] ?? versions.chrome;
   const majorVersion = vRange.min + Math.floor(Math.random() * (vRange.max - vRange.min + 1));

@@ -1,7 +1,7 @@
 {
   "name": "leapfrog",
-  "version": "0.3.0",
-  "description": "Multi-session browser MCP for AI agents — 21 tools, up to 10x fewer tokens than Playwright, stealth mode",
+  "version": "0.5.0",
+  "description": "Multi-session browser MCP for AI agents — 27 tools, stealth, persistent auth, code-first scripts, API sniffer, agent intelligence",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/types.d.ts",
@@ -20,8 +20,7 @@
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "test": "vitest run",
-    "prepublishOnly": "npm run build && npm test",
-    "postinstall": "npx playwright install chromium"
+    "prepublishOnly": "npm run build && npm test"
   },
   "keywords": [
     "mcp",
@@ -51,7 +50,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.11.0",
-    "playwright": "^1.59.0",
+    "playwright-core": "^1.59.0",
+    "tldts": "^7.0.27",
     "zod": "^3.23.0"
   },
   "devDependencies": {

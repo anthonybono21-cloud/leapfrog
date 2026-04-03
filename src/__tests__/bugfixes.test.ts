@@ -223,12 +223,13 @@ describe("QA Bug Regression Tests", () => {
     });
   });
 
-  // ─── BUG-004: navigator.webdriver should be false (not true) ───────
+  // ─── BUG-004: navigator.webdriver should be undefined (not true) ───
   // Standard bot detection signal. The stealth init script patches this
-  // with defineProperty get: () => false after deleting the prototype prop.
+  // by deleting the property so it returns undefined, matching real Chrome
+  // behavior when no automation is present.
 
   describe("BUG-004: navigator.webdriver", () => {
-    it("navigator.webdriver should be false after stealth init script", async () => {
+    it("navigator.webdriver should be undefined after stealth init script", async () => {
       const session = await manager.createSession();
       const page = tabManager.getActivePage(session);
 
@@ -238,12 +239,12 @@ describe("QA Bug Regression Tests", () => {
         return navigator.webdriver;
       });
 
-      expect(webdriverValue).toBe(false);
+      expect(webdriverValue).toBeUndefined();
 
       await manager.destroySession(session.id);
     });
 
-    it("navigator.webdriver should remain false after navigation", async () => {
+    it("navigator.webdriver should remain undefined after navigation", async () => {
       const session = await manager.createSession();
       const page = tabManager.getActivePage(session);
 
@@ -256,7 +257,7 @@ describe("QA Bug Regression Tests", () => {
         return navigator.webdriver;
       });
 
-      expect(webdriverValue).toBe(false);
+      expect(webdriverValue).toBeUndefined();
 
       await manager.destroySession(session.id);
     });
@@ -298,9 +299,9 @@ describe("QA Bug Regression Tests", () => {
 
       await page.goto("about:blank");
 
-      // navigator.webdriver should still be patched (false, not true)
+      // navigator.webdriver should still be patched (undefined, not true)
       const webdriver = await page.evaluate(() => navigator.webdriver);
-      expect(webdriver).toBe(false);
+      expect(webdriver).toBeUndefined();
 
       // Plugins should still be faked
       const pluginCount = await page.evaluate(() => navigator.plugins.length);

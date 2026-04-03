@@ -1,4 +1,4 @@
-import type { Page, Response, ConsoleMessage, Route } from "playwright";
+import type { Page, Response, ConsoleMessage, Route, Request } from "playwright-core";
 import type { Session, NetworkEntry, ConsoleEntry, NetworkInterceptRule } from "./types.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────
@@ -71,6 +71,21 @@ const CONSOLE_LEVEL_MAP: Record<string, ConsoleEntry["level"]> = {
   debug: "debug",
 };
 
+// ─── Response callback type ──────────────────────────────────────────────
+
+export type ResponseCallback = (
+  session: Session,
+  url: string,
+  method: string,
+  status: number,
+  headers: Record<string, string>,
+  body: Buffer | null,
+  duration: number,
+  resourceType: string,
+  requestHeaders?: Record<string, string>,
+  requestBody?: string,
+) => void;
+
 // ─── Filter interfaces ───────────────────────────────────────────────────
 
 export interface NetworkFilter {
@@ -96,6 +111,17 @@ export class NetworkIntelligence {
     string,
     Map<string, { urlPattern: string; handler: (route: Route) => Promise<void> }>
   >();
+
+  /** Registered response callbacks — invoked for every captured response */
+  private responseCallbacks: ResponseCallback[] = [];
+
+  /**
+   * Register a callback that fires for every network response.
+   * Used by ApiIntelligence to capture API traffic.
+   */
+  onResponse(callback: ResponseCallback): void {
+    this.responseCallbacks.push(callback);
+  }
 
   // ── Attach listeners to a page ───────────────────────────────────
 
@@ -195,6 +221,36 @@ export class NetworkIntelligence {
         // Defensive: ensure array exists (session may have been created before attach)
         if (!session.networkLog) session.networkLog = [];
         pushToRingBuffer(session.networkLog, entry, MAX_NETWORK_ENTRIES);
+
+        // Invoke response callbacks (e.g. ApiIntelligence)
+        if (this.responseCallbacks.length > 0) {
+          const request = response.request();
+          let bodyBuffer: Buffer | null = null;
+          try { bodyBuffer = await response.body(); } catch { /* body may be unavailable */ }
+
+          let reqHeaders: Record<string, string> | undefined;
+          try { reqHeaders = await request.allHeaders(); } catch { /* */ }
+
+          let reqBody: string | undefined;
+          try { reqBody = request.postData() ?? undefined; } catch { /* */ }
+
+          for (const cb of this.responseCallbacks) {
+            try {
+              cb(
+                session,
+                url,
+                request.method(),
+                status,
+                headers,
+                bodyBuffer,
+                duration,
+                request.resourceType(),
+                reqHeaders,
+                reqBody,
+              );
+            } catch { /* callbacks must not crash the server */ }
+          }
+        }
       } catch {
         // Network capture must never crash the server — swallow all errors
       }

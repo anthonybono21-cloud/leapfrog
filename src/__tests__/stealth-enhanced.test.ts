@@ -100,18 +100,18 @@ describe("Stealth Enhanced — Real Page Evaluation", () => {
   // ── In-page stealth evaluation tests ──────────────────────────────
 
   describe("navigator.webdriver", () => {
-    it("is false (not true)", async () => {
+    it("is undefined (not true)", async () => {
       const session = await manager.createSession();
       const page = tabManager.getActivePage(session);
       await page.goto("about:blank");
 
       const value = await page.evaluate(() => navigator.webdriver);
-      expect(value).toBe(false);
+      expect(value).toBeUndefined();
 
       await manager.destroySession(session.id);
     });
 
-    it("typeof returns 'boolean'", async () => {
+    it("typeof returns 'undefined'", async () => {
       const session = await manager.createSession();
       const page = tabManager.getActivePage(session);
       await page.goto("about:blank");
@@ -119,7 +119,7 @@ describe("Stealth Enhanced — Real Page Evaluation", () => {
       const typeofValue = await page.evaluate(
         () => typeof navigator.webdriver
       );
-      expect(typeofValue).toBe("boolean");
+      expect(typeofValue).toBe("undefined");
 
       await manager.destroySession(session.id);
     });
@@ -196,20 +196,21 @@ describe("Stealth Enhanced — Real Page Evaluation", () => {
   });
 
   describe("navigator.hardwareConcurrency", () => {
-    it("returns 8 (spoofed)", async () => {
+    it("returns a realistic per-session value (spoofed)", async () => {
       const session = await manager.createSession();
       const page = tabManager.getActivePage(session);
       await page.goto("about:blank");
 
       const cores = await page.evaluate(() => navigator.hardwareConcurrency);
-      expect(cores).toBe(8);
+      // Phase 2.5: Now fingerprint-derived — valid values are [4, 6, 8, 12, 16]
+      expect([4, 6, 8, 12, 16]).toContain(cores);
 
       await manager.destroySession(session.id);
     });
   });
 
   describe("navigator.deviceMemory", () => {
-    it("returns 8 (spoofed)", async () => {
+    it("returns a realistic per-session value (spoofed)", async () => {
       const session = await manager.createSession();
       const page = tabManager.getActivePage(session);
       await page.goto("about:blank");
@@ -217,7 +218,8 @@ describe("Stealth Enhanced — Real Page Evaluation", () => {
       const memory = await page.evaluate(
         () => (navigator as any).deviceMemory
       );
-      expect(memory).toBe(8);
+      // Phase 2.5: Now fingerprint-derived — valid values are [4, 8, 16, 32]
+      expect([4, 8, 16, 32]).toContain(memory);
 
       await manager.destroySession(session.id);
     });
@@ -308,7 +310,8 @@ describe("Stealth Enhanced — Real Page Evaluation", () => {
       });
 
       expect(result.error).toBeNull();
-      expect(result.state).toBe("default");
+      // P2 patch #16 overrides to "prompt" for comprehensive permissions spoofing
+      expect(result.state).toBe("prompt");
 
       await manager.destroySession(session.id);
     });
@@ -502,6 +505,286 @@ describe("Stealth Enhanced — Real Page Evaluation", () => {
       expect(hasCdc).toBe(false);
 
       await manager.destroySession(session.id);
+    });
+  });
+
+  // ── P2: Comprehensive Permissions.prototype.query ─────────────────
+
+  describe("Permissions.prototype.query (P2 #16)", () => {
+    it("returns 'prompt' for notifications", async () => {
+      const session = await manager.createSession();
+      const page = tabManager.getActivePage(session);
+      await page.goto("about:blank");
+
+      const result = await page.evaluate(async () => {
+        const status = await navigator.permissions.query({
+          name: "notifications" as PermissionName,
+        });
+        return status.state;
+      });
+
+      expect(result).toBe("prompt");
+
+      await manager.destroySession(session.id);
+    });
+
+    it("returns 'prompt' for camera permission", async () => {
+      const session = await manager.createSession();
+      const page = tabManager.getActivePage(session);
+      await page.goto("about:blank");
+
+      const result = await page.evaluate(async () => {
+        const status = await navigator.permissions.query({
+          name: "camera" as PermissionName,
+        });
+        return status.state;
+      });
+
+      expect(result).toBe("prompt");
+
+      await manager.destroySession(session.id);
+    });
+
+    it("returns 'granted' for geolocation", async () => {
+      const session = await manager.createSession();
+      const page = tabManager.getActivePage(session);
+      await page.goto("about:blank");
+
+      const result = await page.evaluate(async () => {
+        const status = await navigator.permissions.query({
+          name: "geolocation" as PermissionName,
+        });
+        return status.state;
+      });
+
+      expect(result).toBe("granted");
+
+      await manager.destroySession(session.id);
+    });
+  });
+
+  // ── P3: AudioContext fingerprint noise ─────────────────────────────
+
+  describe("AudioContext fingerprint noise (P3 #17)", () => {
+    it("getChannelData returns slightly different values on repeated calls", async () => {
+      const session = await manager.createSession();
+      const page = tabManager.getActivePage(session);
+      await page.goto("about:blank");
+
+      const results = await page.evaluate(() => {
+        // Create a small AudioContext buffer that matches fingerprint heuristics
+        const ctx = new OfflineAudioContext(1, 4096, 44100);
+        const buffer = ctx.createBuffer(1, 128, 44100);
+        const channelData = buffer.getChannelData(0);
+        // Fill with a known pattern
+        for (let i = 0; i < channelData.length; i++) {
+          channelData[i] = 0.5;
+        }
+
+        // Read it twice — noise should produce different hashes
+        const read1 = Array.from(buffer.getChannelData(0)).slice(0, 10);
+        const read2 = Array.from(buffer.getChannelData(0)).slice(0, 10);
+
+        // Check if at least one value differs between reads
+        let hasDifference = false;
+        for (let i = 0; i < read1.length; i++) {
+          if (read1[i] !== read2[i]) {
+            hasDifference = true;
+            break;
+          }
+        }
+        return { hasDifference, read1, read2 };
+      });
+
+      // With noise injected, repeated reads of the same channel data
+      // should produce slightly different floating-point values
+      expect(results.hasDifference).toBe(true);
+
+      await manager.destroySession(session.id);
+    });
+  });
+
+  // ── P3: WebRTC leak prevention ────────────────────────────────────
+
+  describe("WebRTC leak prevention (P3 #18)", () => {
+    it("RTCPeerConnection filters local IP candidates", async () => {
+      const session = await manager.createSession();
+      const page = tabManager.getActivePage(session);
+      await page.goto("about:blank");
+
+      const result = await page.evaluate(async () => {
+        return new Promise<{ hasLocalIP: boolean; candidateCount: number }>(
+          (resolve) => {
+            try {
+              const pc = new RTCPeerConnection();
+              const candidates: string[] = [];
+              let hasLocalIP = false;
+
+              pc.addEventListener("icecandidate", (event: RTCPeerConnectionIceEvent) => {
+                if (event.candidate && event.candidate.candidate) {
+                  candidates.push(event.candidate.candidate);
+                  // Check for local IP patterns
+                  if (
+                    /((10\.)|(172\.(1[6-9]|2\d|3[01])\.)|(192\.168\.))/.test(
+                      event.candidate.candidate
+                    )
+                  ) {
+                    hasLocalIP = true;
+                  }
+                }
+                if (!event.candidate) {
+                  // ICE gathering complete
+                  resolve({
+                    hasLocalIP,
+                    candidateCount: candidates.length,
+                  });
+                }
+              });
+
+              // Create a data channel to trigger ICE gathering
+              pc.createDataChannel("test");
+              pc.createOffer().then((offer) => pc.setLocalDescription(offer));
+
+              // Timeout after 3 seconds
+              setTimeout(() => {
+                resolve({ hasLocalIP, candidateCount: candidates.length });
+              }, 3000);
+            } catch (e) {
+              // RTCPeerConnection may not be available in headless
+              resolve({ hasLocalIP: false, candidateCount: 0 });
+            }
+          }
+        );
+      });
+
+      // Local IPs should be filtered out by the stealth patch
+      expect(result.hasLocalIP).toBe(false);
+
+      await manager.destroySession(session.id);
+    });
+  });
+
+  // ── P3: Font enumeration spoofing ─────────────────────────────────
+
+  describe("Font enumeration spoofing (P3 #19)", () => {
+    it("returns true for standard web-safe fonts", async () => {
+      const session = await manager.createSession();
+      const page = tabManager.getActivePage(session);
+      await page.goto("about:blank");
+
+      const results = await page.evaluate(() => {
+        const standardFonts = [
+          "Arial",
+          "Georgia",
+          "Times New Roman",
+          "Verdana",
+          "Courier New",
+        ];
+        return standardFonts.map((font) => ({
+          font,
+          available: document.fonts.check(`16px "${font}"`),
+        }));
+      });
+
+      for (const result of results) {
+        expect(result.available).toBe(true);
+      }
+
+      await manager.destroySession(session.id);
+    });
+
+    it("returns deterministic results for non-standard fonts", async () => {
+      const session = await manager.createSession();
+      const page = tabManager.getActivePage(session);
+      await page.goto("about:blank");
+
+      const results = await page.evaluate(() => {
+        const exoticFonts = [
+          "Zapfino",
+          "Wingdings 3",
+          "Bodoni MT",
+          "Papyrus Extra",
+        ];
+        // Check twice — should be deterministic (same hash)
+        const first = exoticFonts.map((f) => document.fonts.check(`16px "${f}"`));
+        const second = exoticFonts.map((f) => document.fonts.check(`16px "${f}"`));
+        return { first, second, match: JSON.stringify(first) === JSON.stringify(second) };
+      });
+
+      // Results must be deterministic across calls
+      expect(results.match).toBe(true);
+
+      await manager.destroySession(session.id);
+    });
+  });
+
+  // ── P1: CDP stealth — Error stack frame filtering ─────────────────
+
+  describe("CDP stealth — Error.prepareStackTrace (P1 #15)", () => {
+    it("getCdpStealthScript returns non-empty JavaScript", () => {
+      const script = stealth.getCdpStealthScript();
+      expect(script).toBeTruthy();
+      expect(script.length).toBeGreaterThan(100);
+      expect(script).toContain("prepareStackTrace");
+      expect(script).toContain("__playwright");
+    });
+
+    it("isCdpStealthEnabled returns true by default (Phase 1.1)", () => {
+      const original = process.env.LEAP_CDP_STEALTH;
+      delete process.env.LEAP_CDP_STEALTH;
+
+      // Phase 1.1: CDP stealth is now default ON — only disabled with LEAP_CDP_STEALTH=false
+      expect(stealth.isCdpStealthEnabled()).toBe(true);
+
+      if (original !== undefined) {
+        process.env.LEAP_CDP_STEALTH = original;
+      }
+    });
+
+    it("isCdpStealthEnabled returns true when LEAP_CDP_STEALTH=true", () => {
+      const original = process.env.LEAP_CDP_STEALTH;
+      process.env.LEAP_CDP_STEALTH = "true";
+
+      expect(stealth.isCdpStealthEnabled()).toBe(true);
+
+      if (original !== undefined) {
+        process.env.LEAP_CDP_STEALTH = original;
+      } else {
+        delete process.env.LEAP_CDP_STEALTH;
+      }
+    });
+
+    it("Error stack frames don't contain __playwright when CDP stealth is on", async () => {
+      const original = process.env.LEAP_CDP_STEALTH;
+      process.env.LEAP_CDP_STEALTH = "true";
+
+      const session = await manager.createSession();
+      const page = tabManager.getActivePage(session);
+
+      // Apply CDP stealth script manually (applyToPage already ran with base stealth)
+      await page.addInitScript(stealth.getCdpStealthScript());
+      await page.goto("about:blank");
+
+      const stackTrace = await page.evaluate(() => {
+        try {
+          throw new Error("test");
+        } catch (e: any) {
+          return e.stack || "";
+        }
+      });
+
+      // The stack trace should not contain __playwright references
+      expect(stackTrace).not.toContain("__playwright");
+      expect(stackTrace).not.toContain("pptr:");
+      expect(stackTrace).not.toContain("devtools://");
+
+      await manager.destroySession(session.id);
+
+      if (original !== undefined) {
+        process.env.LEAP_CDP_STEALTH = original;
+      } else {
+        delete process.env.LEAP_CDP_STEALTH;
+      }
     });
   });
 });

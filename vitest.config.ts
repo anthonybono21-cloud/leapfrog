@@ -6,7 +6,7 @@ export default defineConfig({
     testTimeout: 30000,
     hookTimeout: 30000,
     pool: 'forks', // Safer for Playwright
-    include: ['src/__tests__/**/*.test.ts'],
+    include: ['src/__tests__/**/*.test.ts', 'tests/**/*.test.ts'],
     exclude: ['dist/**'],
   },
 });

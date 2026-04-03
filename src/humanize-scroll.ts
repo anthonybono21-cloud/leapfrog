@@ -1,7 +1,9 @@
 // ─── Humanized Scrolling ───────────────────────────────────────────────────
 //
-// Inertial scroll simulation with ramp-up and momentum decay.
-// Mimics touchpad / mouse-wheel scrolling with physics-based easing.
+// Inertial scroll simulation with ramp-up and momentum decay, variable
+// scroll amounts, read-pause-scroll cycles, overshoot/scroll-back, and
+// cursor-scroll correlation (sympathetic mouse movement).
+//
 // Ported from the validated humanize.js prototype (tested on 3090 box,
 // statistically verified).
 //
@@ -11,8 +13,8 @@
 //
 // Standalone module — no cross-dependencies on other humanize modules.
 
-import type { Page } from "playwright";
-import { gaussianRandom, clamp, humanDelay, sleep, isHumanizeEnabled } from "./humanize-utils.js";
+import type { Page } from "playwright-core";
+import { gaussianRandom, clamp, humanDelay, sleep, isHumanizeEnabled, normalRandom } from "./humanize-utils.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -115,6 +117,12 @@ export class HumanScroll {
    * Each step in the scroll plan is dispatched as a mouse wheel event
    * with an inter-step delay to simulate real scrolling inertia.
    *
+   * Enhancements over basic scroll:
+   * - Variable scroll amounts (normalRandom instead of fixed)
+   * - Read-pause-scroll cycles (800-3000ms reading gaps between chunks)
+   * - 10% chance of overshoot + scroll-back correction
+   * - Sympathetic cursor micro-movements during scrolling
+   *
    * No-op if humanization is disabled.
    *
    * @param page - Playwright page instance
@@ -123,12 +131,96 @@ export class HumanScroll {
   async scroll(page: Page, distance: number): Promise<void> {
     if (!this.isEnabled()) return;
 
-    const plan = humanScrollPlan(distance);
+    // Variable scroll amount: apply Gaussian variation to the requested distance.
+    // Humans rarely scroll an exact number of pixels — add +/-15% noise.
+    const variableDistance = distance === 0
+      ? 0
+      : Math.round(distance + gaussianRandom(0, Math.abs(distance) * 0.05));
 
-    for (const step of plan) {
-      await sleep(step.delay);
-      await page.mouse.wheel(0, step.delta);
+    // Break long scrolls into read-pause-scroll chunks.
+    // Each chunk is a "scroll gesture" followed by a reading pause.
+    const chunkSize = Math.round(Math.abs(normalRandom(350, 100)));
+    const effectiveChunk = Math.max(chunkSize, 80); // floor at 80px
+    const totalAbs = Math.abs(variableDistance);
+    const direction = variableDistance >= 0 ? 1 : -1;
+
+    let scrolled = 0;
+    let isFirstChunk = true;
+
+    while (scrolled < totalAbs) {
+      // Read-pause: wait between scroll gestures (skip before first chunk)
+      if (!isFirstChunk) {
+        const readPause = humanDelay(800, 3000);
+        await sleep(readPause);
+      }
+      isFirstChunk = false;
+
+      const chunkRemaining = Math.min(effectiveChunk, totalAbs - scrolled);
+      const plan = humanScrollPlan(chunkRemaining * direction);
+
+      // Sympathetic cursor movement: small random mouse moves during scrolling
+      // to simulate hand-on-trackpad/mouse-wheel posture
+      for (const step of plan) {
+        await sleep(step.delay);
+        await page.mouse.wheel(0, step.delta);
+
+        // Cursor-scroll correlation: ~30% chance of small sympathetic mouse move
+        if (Math.random() < 0.3) {
+          const sympatheticX = gaussianRandom(0, 1.5);
+          const sympatheticY = gaussianRandom(0, 2.0);
+          try {
+            await page.mouse.move(
+              400 + sympatheticX, // approximate center-ish x with jitter
+              300 + sympatheticY, // approximate center-ish y with jitter
+              { steps: 1 },
+            );
+          } catch {
+            // Mouse move during scroll can fail if page is navigating — safe to ignore
+          }
+        }
+      }
+
+      scrolled += chunkRemaining;
     }
+
+    // Overshoot + scroll-back: 10% of scroll operations overshoot then correct
+    if (totalAbs > 0 && Math.random() < 0.10) {
+      const overshootAmount = Math.round(50 + Math.random() * 50); // 50-100px
+      const overshootPlan = humanScrollPlan(overshootAmount * direction);
+
+      for (const step of overshootPlan) {
+        await sleep(step.delay);
+        await page.mouse.wheel(0, step.delta);
+      }
+
+      // Brief pause before correction (realizing overshoot)
+      await sleep(humanDelay(150, 400));
+
+      // Scroll back to correct
+      const correctionPlan = humanScrollPlan(overshootAmount * -direction);
+      for (const step of correctionPlan) {
+        await sleep(step.delay);
+        await page.mouse.wheel(0, step.delta);
+      }
+    }
+  }
+
+  /**
+   * Scroll with variable distance. Uses normalRandom(350, 100) to determine
+   * a natural scroll distance, then executes the humanized scroll.
+   *
+   * Useful when the caller just wants "scroll down some" without a specific
+   * pixel target.
+   *
+   * @param page - Playwright page instance
+   * @param direction - "down" (positive) or "up" (negative)
+   */
+  async scrollVariable(page: Page, direction: "down" | "up" = "down"): Promise<void> {
+    if (!this.isEnabled()) return;
+
+    const amount = Math.round(Math.abs(normalRandom(350, 100)));
+    const distance = direction === "down" ? amount : -amount;
+    await this.scroll(page, distance);
   }
 }
 
