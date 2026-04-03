@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">Leapfrog</h1>
-<p align="center"><strong>Multi-session browser MCP for AI agents.</strong><br/>27 tools. 15 parallel sessions. Stealth. Humanization. Up to 10x fewer tokens.</p>
+<p align="center"><strong>Multi-session browser MCP for AI agents.</strong><br/>31 tools. 15 parallel sessions. Stealth. Humanization. Up to 10x fewer tokens.</p>
 
 <p align="center">
 <code>npm i leapfrog</code>&nbsp;&nbsp;|&nbsp;&nbsp;Works with Claude Code, Cursor, Windsurf
@@ -33,8 +33,9 @@ Savings range from 2-10x depending on page complexity. Content-heavy pages see t
 ## Quick Start
 
 ```bash
-npx leapfrog --doctor   # verify everything works
-npx leapfrog --config   # print MCP config to paste
+npx leapfrog --doctor          # verify everything works
+npx leapfrog --stealth-audit   # test all 19 stealth patches
+npx leapfrog --config          # print MCP config to paste
 ```
 
 Add to `~/.mcp.json` (Claude Code) or your editor's MCP config:
@@ -78,6 +79,11 @@ Leapfrog uses `playwright-core` (15MB) instead of `playwright` (1.6GB) and does 
 | Page classification (18) | Yes | No | No |
 | Session memory | Yes | No | No |
 | API intelligence | Yes | No | No |
+| Adaptive wait + auto-retry | Yes | No | No |
+| Record / replay | Yes | No | No |
+| Pagination extraction | Yes | No | No |
+| Incremental snapshots (diff) | Yes | No | No |
+| Stealth self-test CLI | Yes | No | No |
 | SSRF protection | Yes | No | No |
 
 ## Stealth
@@ -138,6 +144,40 @@ The harness tracks every action in a session and classifies outcomes:
 
 Persistent browser profiles now use `context.cookies()` + `addCookies()` instead of `storageState()`, which returns empty on persistent contexts. Auth state survives across sessions.
 
+## Adaptive Wait + Stealth Escalation
+
+Navigate automatically retries with fallback strategies when pages fail to load:
+
+1. Try `load` (fastest) — if empty, retry with `networkidle` (10s cap)
+2. If `networkidle` times out (Amazon, ad-heavy sites), fall back to `domcontentloaded`
+3. If blocked/challenged, escalate stealth: random delays → wait for JS challenge → rotate session with fresh fingerprint
+4. Profile sessions (auth'd) never have their session destroyed — hard-capped at Level 2
+
+Opt-out with `autoRetry: false` on `navigate`. Control max escalation with `maxRetryLevel` (0-5, default 3).
+
+## Record / Replay
+
+Export a session's action history as a replayable recording, then replay it in new sessions:
+
+- **`session_export`** — creates parameterized JSON or Playwright script from session history. `@eN` refs resolved to stable CSS selectors. Auto-detects emails, passwords, URLs as `{{placeholders}}`.
+- **`session_replay`** — replays a recording with parameter overrides. Supports `onError: 'stop'` or `'skip'`.
+
+Turn one-off agent workflows into reusable automations.
+
+## Pagination Extraction
+
+Extract data across multiple pages in a single tool call:
+
+- **Click-next** — auto-detects "Next" buttons, pagination links, "Load more" buttons
+- **Infinite scroll** — scrolls and waits for new content via DOM hash comparison
+- **URL pattern** — increments `?page={page}` or custom patterns
+
+Replaces 3-4 tool calls per page. Cap: 50 pages, 100K total chars. Stops on: no next button, empty page, duplicate content, or bot detection.
+
+## Incremental Snapshots
+
+The `diff` tool returns only what changed since the last snapshot — additions, removals, changes. Massive token savings for monitoring and polling workflows.
+
 ## SSRF Hardening
 
 URL validation blocks hex-encoded IPs (`0x7f000001`), octal notation (`0177.0.0.1`), CGNAT ranges (`100.64.0.0/10`), and redirect chains that resolve to internal addresses.
@@ -156,7 +196,7 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | Console errors | **Croak** | Something went wrong in the browser |
 | Stealth mode | **Camouflage** | Anti-bot evasion patches |
 
-## All 27 Tools
+## All 31 Tools
 
 ### Pond Management (9)
 
@@ -172,19 +212,22 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | `profile_list` | List saved persistent browser profiles |
 | `profile_delete` | Delete a saved persistent browser profile and its data |
 
-### Navigation & Snapshots (9)
+### Navigation & Snapshots (12)
 
 | Tool | What it does |
 |---|---|
-| `navigate` | Leap to a URL, return a compact `@eN` snapshot |
+| `navigate` | Leap to a URL, return a compact `@eN` snapshot. Adaptive wait + stealth escalation built in. |
 | `snapshot` | Re-read the surface (scope with CSS selector) |
+| `diff` | Incremental snapshot — returns only what changed since last snapshot |
 | `act` | Click, fill, type, check, select, press, scroll, hover, mousemove, drag, upload, resize, back, forward |
 | `batch_actions` | Up to 100 sequential actions in one MCP call — eliminates round-trip overhead |
+| `paginate` | Extract data across multiple pages in one call (click-next, scroll, URL pattern) |
 | `add_init_script` | Inject JS that runs before every page load, persists across navigations |
 | `wait_for` | Wait for element / text / network idle / navigation / JS expression |
 | `screenshot` | Capture PNG (full page or element) |
 | `extract` | Pull text, HTML, title, URL, or evaluate JS |
 | `session_memory` | Recall actions performed in this session — recovers context after compression |
+| `session_export` | Export session history as a replayable JSON recording or Playwright script |
 
 ### Tab Management (3)
 
@@ -194,7 +237,7 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | `tab_switch` | Hop to another pad (-1 for most recent popup) |
 | `tab_close` | Close a pad (can't close the last one) |
 
-### Network & API Intelligence (6)
+### Network & API Intelligence (7)
 
 | Tool | What it does |
 |---|---|
@@ -204,6 +247,7 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | `api_discover` | List JSON APIs the page has called, classified by category (data, tracking, auth, cdn, ads) |
 | `api_export` | Generate an OpenAPI v3 spec from observed API traffic |
 | `execute` | Run a Playwright script in a sandboxed environment — replaces 5-20 sequential MCP round trips |
+| `session_replay` | Replay a recording in the current session with parameter overrides |
 
 ## Environment Variables
 
