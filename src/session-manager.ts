@@ -1,5 +1,5 @@
 import { chromium } from "playwright-core";
-import type { Browser, BrowserContext } from "playwright-core";
+import type { Browser, BrowserContext, Page } from "playwright-core";
 import type {
   Session,
   SessionCreateOptions,
@@ -651,6 +651,58 @@ export class SessionManager implements ISessionManager {
 
   getSessions(): Map<string, Session> {
     return this.sessions;
+  }
+
+  /**
+   * Rotate a session: destroy the old one and create a fresh session with
+   * a new fingerprint and humanization enabled. Used by stealth escalation
+   * when a site blocks the current session.
+   *
+   * Returns the new session and its active page, plus the URL the old session
+   * was on (so the caller can navigate back).
+   *
+   * SAFETY: Never call this on profile/auth sessions — the caller must guard.
+   */
+  async rotateSession(oldSessionId: string): Promise<{
+    session: Session;
+    page: Page;
+    previousUrl: string;
+  }> {
+    const oldSession = this.sessions.get(oldSessionId);
+    if (!oldSession) {
+      throw new Error(`Cannot rotate session "${oldSessionId}" — not found.`);
+    }
+
+    // Capture the URL we'll want to navigate back to
+    let previousUrl = "about:blank";
+    try {
+      previousUrl = oldSession.page.url();
+    } catch {
+      /* page may be crashed */
+    }
+
+    // Preserve client ID for pool accounting
+    const clientId = oldSession.clientId;
+
+    // Destroy old session (saves profile state if applicable)
+    await this.destroySession(oldSessionId);
+
+    // Create fresh session with humanization enabled via env
+    // The new session automatically gets a fresh fingerprint via generateFingerprint()
+    const newSession = await this.createSession({
+      stealth: true,
+      clientId,
+    });
+
+    const page = tabManager.getActivePage(newSession);
+
+    logger.info("session.rotated", {
+      oldId: oldSessionId,
+      newId: newSession.id,
+      previousUrl,
+    });
+
+    return { session: newSession, page, previousUrl };
   }
 
   getResourceUsage(): { heapUsedMB: number; rssMB: number; sessionsActive: number; uptimeSeconds: number } {

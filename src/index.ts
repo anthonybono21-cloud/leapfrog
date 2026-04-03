@@ -25,6 +25,11 @@ import { SnapshotDiffer } from "./snapshot-differ.js";
 import { ApiIntelligence } from "./api-intelligence.js";
 import { PageClassifier } from "./page-classifier.js";
 import { HarnessIntelligence, formatHarnessOutput } from "./harness-intelligence.js";
+import { adaptiveNavigate, formatAdaptiveResult } from "./adaptive-wait.js";
+import { runStealthAudit } from "./stealth-audit.js";
+import { exportSession, replayRecording, toPlaywrightScript } from "./recording.js";
+import type { Recording } from "./recording.js";
+import { paginate } from "./paginate.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
@@ -526,9 +531,20 @@ server.registerTool(
         .enum(["load", "domcontentloaded", "networkidle"])
         .default("load")
         .describe("Wait strategy. Use networkidle for SPAs."),
+      autoRetry: z
+        .boolean()
+        .default(true)
+        .describe("Auto-retry with stealth escalation when blocked. Default: true."),
+      maxRetryLevel: z
+        .number()
+        .int()
+        .min(0)
+        .max(5)
+        .default(3)
+        .describe("Max escalation level (0-5). Level 3+ rotates session. Default: 3."),
     }).strict(),
   },
-  async ({ sessionId, url, waitUntil }) => {
+  async ({ sessionId, url, waitUntil, autoRetry, maxRetryLevel }) => {
     try {
       // Block dangerous URL schemes
       let parsed: URL;
@@ -551,33 +567,6 @@ server.registerTool(
       const startTime = Date.now();
       const session = requireSession(sessionId);
       const page = getPage(session);
-      await page.goto(url, { waitUntil });
-
-      // P0 #2: Delete navigator.webdriver post-navigation. Playwright re-adds it
-      // via CDP after init scripts run, so we must clean up after goto completes.
-      try {
-        await page.evaluate(() => {
-          try {
-            delete (Object.getPrototypeOf(navigator) as any).webdriver;
-            delete (Navigator.prototype as any).webdriver;
-            delete (navigator as any).webdriver;
-          } catch { /* non-configurable or already deleted */ }
-        });
-      } catch { /* page may have navigated away */ }
-
-      // P0-2: Post-navigation SSRF check — catch 302 redirects to internal IPs
-      const finalUrl = page.url();
-      try {
-        const finalParsed = new URL(finalUrl);
-        if (finalParsed.hostname !== parsed.hostname) {
-          const redirectBlock = await checkSSRF(finalParsed.hostname);
-          if (redirectBlock) {
-            logger.warn("security.ssrf_redirect_blocked", { url, finalUrl, hostname: finalParsed.hostname });
-            await page.goto("about:blank");
-            return err(`Redirect blocked: ${url} redirected to ${finalUrl} — ${redirectBlock}`);
-          }
-        }
-      } catch { /* final URL parse error is non-fatal */ }
 
       // Bump nav generation — any refs from before this navigation are now stale
       session.navGeneration = (session.navGeneration ?? 0) + 1;
@@ -585,107 +574,52 @@ server.registerTool(
       // Reset API captures for the new page
       ApiIntelligence.clearSession(sessionId);
 
-      // Take initial snapshot
-      const snapResult = await snapEngine.snapshot(page, session, {
-        interactiveOnly: true,
-        maxChars: MAX_SNAPSHOT_CHARS,
+      // Adaptive navigate with wait strategy selection + stealth escalation
+      const result = await adaptiveNavigate(page, session, url, sessions, {
+        waitUntil,
+        autoRetry,
+        maxRetryLevel,
       });
-      session.refNavGeneration = session.navGeneration ?? 0;
 
-      // SPA detection: if 0 interactive elements, wait for JS rendering
-      let spaWarning = "";
-      if (snapResult.nodeCount === 0) {
-        try {
-          await page.waitForSelector(
-            'input, button, a, select, [role="button"], [role="link"], [role="textbox"]',
-            { timeout: 5000 },
-          );
-          // Re-snapshot with the rendered content
-          const reSnap = await snapEngine.snapshot(page, session, {
-            interactiveOnly: true,
-            maxChars: MAX_SNAPSHOT_CHARS,
-          });
-          session.refNavGeneration = session.navGeneration ?? 0;
-          // Use the re-snapshot result for output
-          const pageUrl = page.url();
-          let title = "";
-          try { title = await page.title(); } catch { /* */ }
+      // P0-2: Post-navigation SSRF check — catch 302 redirects to internal IPs
+      try {
+        const finalParsed = new URL(result.url);
+        if (finalParsed.hostname !== parsed.hostname) {
+          const redirectBlock = await checkSSRF(finalParsed.hostname);
+          if (redirectBlock) {
+            logger.warn("security.ssrf_redirect_blocked", { url, finalUrl: result.url, hostname: finalParsed.hostname });
+            await result.page.goto("about:blank");
+            return err(`Redirect blocked: ${url} redirected to ${result.url} — ${redirectBlock}`);
+          }
+        }
+      } catch { /* final URL parse error is non-fatal */ }
 
-          // Page classification
-          let classificationLine = "";
-          try {
-            let meta: { ogType?: string; jsonLdType?: string; robots?: string; description?: string } | undefined;
-            try {
-              meta = await page.evaluate(() => {
-                const og = document.querySelector('meta[property="og:type"]')?.getAttribute("content") ?? undefined;
-                const desc = document.querySelector('meta[name="description"]')?.getAttribute("content") ?? undefined;
-                const robots = document.querySelector('meta[name="robots"]')?.getAttribute("content") ?? undefined;
-                let jsonLdType: string | undefined;
-                const ld = document.querySelector('script[type="application/ld+json"]');
-                if (ld) { try { const parsed = JSON.parse(ld.textContent ?? ""); jsonLdType = parsed["@type"]; } catch { /* */ } }
-                return { ogType: og, jsonLdType, robots, description: desc };
-              });
-            } catch { /* meta extraction is best-effort */ }
-            const classification = PageClassifier.classify({ url: pageUrl, snapshotText: reSnap.text, meta });
-            classificationLine = `\n\n[page: ${classification.type} (${Math.round(classification.confidence * 100)}%)]`;
+      // Update ref nav generation on the final session
+      result.session.refNavGeneration = result.session.navGeneration ?? 0;
 
-            // Auto-challenge solver (Fix 5)
-            if (classification.type === 'challenge') {
-              const challengeResult = await attemptChallengeResolve(page, session, classification.confidence);
-              if (challengeResult) {
-                const duration = Date.now() - startTime;
-                HarnessIntelligence.recordToolCall(sessionId, 'navigate', { url }, `Navigated to ${url} (${reSnap.nodeCount} elements, challenge resolved)`, duration);
-                return ok(challengeResult);
-              }
-            }
-          } catch { /* classification is best-effort */ }
-
+      // Auto-challenge solver — try button/checkbox click on challenge pages
+      if (result.classification.type === 'challenge' && result.quality !== "BLOCKED") {
+        const challengeResult = await attemptChallengeResolve(result.page, result.session, result.classification.confidence);
+        if (challengeResult) {
           const duration = Date.now() - startTime;
-          HarnessIntelligence.recordToolCall(sessionId, 'navigate', { url }, `Navigated to ${url} (${reSnap.nodeCount} elements)`, duration);
-          return ok(`[${session.id}] ${title}\n${pageUrl}\n${reSnap.nodeCount} elements\n\n${reSnap.text}${classificationLine}`);
-        } catch {
-          // Timeout — no interactive elements appeared
-          spaWarning = "\n\n[SPA] Page returned 0 elements. Auto-waited 5s but no interactive elements appeared. Page may be loading — try snapshot() in a moment.";
+          HarnessIntelligence.recordToolCall(
+            result.session.id, 'navigate', { url },
+            `Navigated to ${url} (challenge resolved)`, duration
+          );
+          return ok(challengeResult);
         }
       }
 
-      // Build output from initial snapshot
-      const pageUrl = page.url();
-      let title = "";
-      try { title = await page.title(); } catch { /* */ }
-      let output = `[${session.id}] ${title}\n${pageUrl}\n${snapResult.nodeCount} elements\n\n${snapResult.text}`;
-
-      // Page classification + challenge solver
-      try {
-        let meta: { ogType?: string; jsonLdType?: string; robots?: string; description?: string } | undefined;
-        try {
-          meta = await page.evaluate(() => {
-            const og = document.querySelector('meta[property="og:type"]')?.getAttribute("content") ?? undefined;
-            const desc = document.querySelector('meta[name="description"]')?.getAttribute("content") ?? undefined;
-            const robots = document.querySelector('meta[name="robots"]')?.getAttribute("content") ?? undefined;
-            let jsonLdType: string | undefined;
-            const ld = document.querySelector('script[type="application/ld+json"]');
-            if (ld) { try { const parsed = JSON.parse(ld.textContent ?? ""); jsonLdType = parsed["@type"]; } catch { /* */ } }
-            return { ogType: og, jsonLdType, robots, description: desc };
-          });
-        } catch { /* meta extraction is best-effort */ }
-        const classification = PageClassifier.classify({ url: pageUrl, snapshotText: snapResult.text, meta });
-        output += `\n\n[page: ${classification.type} (${Math.round(classification.confidence * 100)}%)]`;
-
-        // Auto-challenge solver (Fix 5)
-        if (classification.type === 'challenge') {
-          const challengeResult = await attemptChallengeResolve(page, session, classification.confidence);
-          if (challengeResult) {
-            const duration = Date.now() - startTime;
-            HarnessIntelligence.recordToolCall(sessionId, 'navigate', { url }, `Navigated to ${url} (${snapResult.nodeCount} elements, challenge resolved)`, duration);
-            return ok(challengeResult);
-          }
-        }
-      } catch { /* classification is best-effort */ }
-
       const duration = Date.now() - startTime;
-      HarnessIntelligence.recordToolCall(sessionId, 'navigate', { url }, `Navigated to ${url} (${snapResult.nodeCount} elements)`, duration);
-      return ok(output + spaWarning);
+      const output = formatAdaptiveResult(result);
+
+      HarnessIntelligence.recordToolCall(
+        result.session.id, 'navigate', { url },
+        `Navigated to ${url} (${result.snapshot.nodeCount} elements${result.escalation ? `, escalation L${result.escalation.level}` : ''})`,
+        duration
+      );
+
+      return ok(output);
     } catch (e: any) {
       return err(`Navigate failed: ${e.message}`);
     }
@@ -2033,6 +1967,134 @@ server.registerTool(
   },
 );
 
+// ─── paginate ────────────────────────────────────────────────────────────
+
+server.registerTool(
+  "paginate",
+  {
+    title: "Pagination Extraction",
+    description:
+      "Extract data across multiple pages in a single call. Handles click-next, infinite scroll, and URL-pattern pagination. " +
+      "Auto-detects 'next' buttons when nextSelector='auto'. Returns extracted content from each page plus metadata. " +
+      "Replaces 3-4 tool calls per page with one invocation. Cap: 50 pages, 100K total chars.",
+    inputSchema: z.object({
+      sessionId: z.string().describe("Session ID."),
+      extractType: z.enum(["text", "html", "js"]).default("text").describe("What to extract from each page."),
+      extractTarget: z.string().optional().describe("CSS selector to scope extraction to a specific container."),
+      extractJs: z.string().optional().describe("JavaScript expression for extractType='js'."),
+      nextSelector: z.string().default("auto").describe("CSS selector for the next button, or 'auto' to detect automatically."),
+      paginationType: z.enum(["click", "scroll", "url"]).default("click").describe("Pagination strategy: click (next button), scroll (infinite scroll), url (URL pattern)."),
+      urlPattern: z.string().optional().describe("URL pattern with {page} placeholder for paginationType='url'."),
+      maxPages: z.number().int().min(1).max(50).default(10).describe("Maximum pages to extract. Default: 10."),
+      delayMs: z.number().int().min(0).max(30000).default(1000).describe("Delay between pages in ms. Default: 1000."),
+      maxCharsPerPage: z.number().int().min(100).max(50000).default(5000).describe("Max characters per page extraction. Default: 5000."),
+      stopWhen: z.enum(["no_next", "empty", "duplicate", "auto"]).default("auto").describe("Stop condition. Default: auto (all heuristics)."),
+    }).strict(),
+  },
+  async ({ sessionId, extractType, extractTarget, extractJs, nextSelector, paginationType, urlPattern, maxPages, delayMs, maxCharsPerPage, stopWhen }) => {
+    try {
+      const session = requireSession(sessionId);
+      const page = getPage(session);
+      const result = await paginate(page, session, {
+        extractType, extractTarget, extractJs, nextSelector, paginationType, urlPattern, maxPages, delayMs, maxCharsPerPage, stopWhen,
+      });
+      const lines: string[] = [];
+      lines.push(`Pagination complete: ${result.metadata.totalPages} pages, ${result.metadata.totalChars} chars`);
+      lines.push(`Stopped: ${result.metadata.stoppedBecause} | Duration: ${result.metadata.duration}ms`);
+      lines.push(`URLs: ${result.metadata.urls.join(", ")}`);
+      lines.push("");
+      for (const p of result.pages) {
+        lines.push(`--- Page ${p.pageNum} (${p.url}) [~${p.tokens} tokens] ---`);
+        lines.push(p.data);
+        lines.push("");
+      }
+      return ok(lines.join("\n"));
+    } catch (e: any) {
+      return err(`Paginate failed: ${e.message}`);
+    }
+  },
+);
+
+// ─── session_export ──────────────────────────────────────────────────────
+
+server.registerTool(
+  "session_export",
+  {
+    title: "Export Session Recording",
+    description:
+      "Export session action history as a replayable recording. " +
+      "Creates a JSON script from all mutating actions with @eN refs resolved to stable selectors. " +
+      "Use format='playwright' to get a Playwright JS script compatible with the execute tool.",
+    inputSchema: z.object({
+      sessionId: z.string().describe("Session ID."),
+      name: z.string().optional().describe("Recording name. Default: auto-generated."),
+      keepExtracts: z.boolean().optional().describe("Include extract steps in the recording. Default: false."),
+      format: z.enum(["json", "playwright"]).optional().describe("Output format. Default: json."),
+    }).strict(),
+  },
+  async ({ sessionId, name, keepExtracts, format }) => {
+    try {
+      const session = requireSession(sessionId);
+      const result = exportSession(sessionId, session, { name, keepExtracts, format });
+      if (typeof result === "string") {
+        return ok(result);
+      }
+      const json = JSON.stringify(result, null, 2);
+      const summary = `Recording "${result.name}": ${result.steps.length} steps, ${Object.keys(result.params).length} param(s)`;
+      return ok(`${summary}\n\n${json}`);
+    } catch (e: any) {
+      return err(e.message);
+    }
+  },
+);
+
+// ─── session_replay ──────────────────────────────────────────────────────
+
+server.registerTool(
+  "session_replay",
+  {
+    title: "Replay Session Recording",
+    description:
+      "Replay a recording in the current session. Executes each step directly against the browser. " +
+      "Override {{placeholder}} params with the params object. Set onError='skip' to continue past failures.",
+    inputSchema: z.object({
+      sessionId: z.string().describe("Session ID."),
+      recording: z.string().describe("Recording JSON string (from session_export)."),
+      params: z.record(z.string()).optional().describe("Parameter overrides for {{placeholder}} values."),
+      onError: z.enum(["stop", "skip"]).optional().describe("Error handling: stop (default) or skip."),
+    }).strict(),
+  },
+  async ({ sessionId, recording: recordingJson, params, onError }) => {
+    try {
+      const session = requireSession(sessionId);
+      const page = getPage(session);
+      let recording: Recording;
+      try {
+        recording = JSON.parse(recordingJson) as Recording;
+      } catch {
+        return err("Invalid recording JSON. Pass the JSON output from session_export.");
+      }
+      if (recording.version !== 1) {
+        return err(`Unsupported recording version: ${recording.version}. Expected 1.`);
+      }
+      const result = await replayRecording(recording, session, page, params, { onError });
+      const lines = [
+        `Replay "${recording.name}": ${result.status}`,
+        `${result.stepsCompleted}/${result.stepsTotal} steps completed (${result.totalDuration}ms)`,
+        "",
+      ];
+      for (const r of result.results) {
+        const status = r.status === "ok" ? "OK" : "ERR";
+        const errMsg = r.error ? ` — ${r.error}` : "";
+        lines.push(`  [${r.step}] ${status} ${r.tool} (${r.duration}ms)${errMsg}`);
+      }
+      return ok(lines.join("\n"));
+    } catch (e: any) {
+      return err(e.message);
+    }
+  },
+);
+
 // ─── CLI Flags ─────────────────────────────────────────────────────────────
 
 async function runDoctor(): Promise<void> {
@@ -2122,9 +2184,14 @@ function printHelp(): void {
 Usage: npx leapfrog [options]
 
 Options:
-  --doctor    Run diagnostics and verify installation
-  --config    Print MCP configuration JSON
-  --help, -h  Show this help message
+  --doctor         Run diagnostics and verify installation
+  --stealth-audit  Run stealth self-test (bot detection checks)
+    --local-only     Tier 1 only (~2s, no external sites)
+    --full           Include Tier 3 extended checks (~45s)
+    --json           Output structured JSON
+    --headed         Run with visible browser window
+  --config         Print MCP configuration JSON
+  --help, -h       Show this help message
 
 Environment Variables:
   LEAP_MAX_SESSIONS    Max concurrent sessions (default: 15)
@@ -2183,6 +2250,16 @@ async function main() {
 
   if (args.includes("--doctor")) {
     await runDoctor();
+    return;
+  }
+
+  if (args.includes("--stealth-audit")) {
+    await runStealthAudit({
+      localOnly: args.includes("--local-only"),
+      full: args.includes("--full"),
+      json: args.includes("--json"),
+      headed: args.includes("--headed"),
+    });
     return;
   }
 
