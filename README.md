@@ -180,7 +180,7 @@ The `diff` tool returns only what changed since the last snapshot — additions,
 
 ## SSRF Hardening
 
-URL validation blocks hex-encoded IPs (`0x7f000001`), octal notation (`0177.0.0.1`), CGNAT ranges (`100.64.0.0/10`), and redirect chains that resolve to internal addresses.
+URL validation blocks hex-encoded IPs (`0x7f000001`), octal notation (`0177.0.0.1`), CGNAT ranges (`100.64.0.0/10`), and redirect chains that resolve to internal addresses. Localhost and `127.0.0.0/8` are allowed by default for local dev workflows — set `LEAP_BLOCK_LOCALHOST=true` to block them.
 
 ## The Ecosystem
 
@@ -261,13 +261,14 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | `LEAP_STEALTH` | `true` | Stealth mode (anti-bot evasion) — 19 patches |
 | `LEAP_HUMANIZE` | `false` | Experimental. Human-like mouse movement, typing cadence, and scroll behavior. |
 | `LEAP_ALLOW_EXECUTE` | `true` | Allow the `execute` tool (sandboxed Playwright scripts) |
+| `LEAP_BLOCK_LOCALHOST` | `false` | Block localhost/127.x.x.x (allowed by default for local dev) |
 | `LEAP_PROFILES_DIR` | `~/.leapfrog/chrome-profiles` | Directory for persistent browser profiles |
 | `LEAP_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 
 ## Tests
 
 ```
- 537 passing across 20 suites
+ 554 passing across 21 suites
 ```
 
 Session management, snapshot engine, network intelligence, tab management, security, SSRF protection, stealth patches (19), humanization (mouse, typing, scroll), page classification, harness intelligence, API intelligence, script executor, extended actions, bug regression, stress tests, benchmarks.
