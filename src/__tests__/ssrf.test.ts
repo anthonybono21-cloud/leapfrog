@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { checkSSRFSync, checkSSRF } from '../ssrf.js';
 
 // ---------------------------------------------------------------------------
@@ -7,7 +7,14 @@ import { checkSSRFSync, checkSSRF } from '../ssrf.js';
 // Tests the REAL production functions from src/ssrf.ts.
 // checkSSRFSync() returns a block reason string (truthy) or null (allowed).
 // checkSSRF() is the async version that adds DNS resolution on top.
+//
+// NOTE: Localhost/loopback is ALLOWED by default. Tests that verify blocking
+// of 127.x.x.x and localhost set LEAP_BLOCK_LOCALHOST=true via beforeEach.
 // ---------------------------------------------------------------------------
+
+// Block localhost for existing SSRF blocking tests
+beforeEach(() => { process.env.LEAP_BLOCK_LOCALHOST = 'true'; });
+afterEach(() => { delete process.env.LEAP_BLOCK_LOCALHOST; });
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -513,5 +520,47 @@ describe('SSRF — return value format', () => {
     expect(checkSSRFSync('192.168.1.1')).toContain('192.168.1.1');
     expect(checkSSRFSync('localhost')).toContain('localhost');
     expect(checkSSRFSync('evil.internal')).toContain('evil.internal');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// J. Localhost allow-by-default (LEAP_BLOCK_LOCALHOST not set)
+// ---------------------------------------------------------------------------
+
+describe('SSRF — localhost allowed by default', () => {
+  beforeEach(() => { delete process.env.LEAP_BLOCK_LOCALHOST; });
+
+  it('allows localhost by default', () => {
+    expectAllowed('localhost');
+  });
+
+  it('allows localhost.localdomain by default', () => {
+    expectAllowed('localhost.localdomain');
+  });
+
+  it('allows 127.0.0.1 by default', () => {
+    expectAllowed('127.0.0.1');
+  });
+
+  it('allows ::1 by default', () => {
+    expectAllowed('::1');
+  });
+
+  it('still blocks other internal IPs by default', () => {
+    expectBlocked('10.0.0.1', 'internal IP');
+    expectBlocked('192.168.1.1', 'internal IP');
+    expectBlocked('172.16.0.1', 'internal IP');
+    expectBlocked('169.254.169.254', 'internal IP');
+  });
+
+  it('still blocks cloud metadata by default', () => {
+    expectBlocked('metadata.google.internal');
+  });
+
+  it('blocks localhost when LEAP_BLOCK_LOCALHOST=true', () => {
+    process.env.LEAP_BLOCK_LOCALHOST = 'true';
+    expectBlocked('localhost', 'reserved hostname');
+    expectBlocked('127.0.0.1', 'internal IP');
+    delete process.env.LEAP_BLOCK_LOCALHOST;
   });
 });

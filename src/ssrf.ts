@@ -13,13 +13,17 @@ import * as dns from "dns/promises";
 import * as net from "net";
 import { logger } from "./logger.js";
 
-// ─── Localhost allowlist ────────────────────────────────────────────────
+// ─── Localhost policy ───────────────────────────────────────────────────
 //
-// LEAP_ALLOW_LOCALHOST=true bypasses SSRF blocking for localhost and
-// 127.0.0.0/8 only. All other internal ranges (10.x, 172.16.x, 192.168.x,
-// cloud metadata, etc.) remain blocked. Useful for local dev/QA.
+// Localhost and 127.0.0.0/8 are ALLOWED by default. Leapfrog is a local-first
+// dev tool — blocking your own dev server out of the box is hostile UX.
+// Set LEAP_BLOCK_LOCALHOST=true to block loopback for hardened environments.
+// All other internal ranges (10.x, 172.16.x, 192.168.x, cloud metadata)
+// remain blocked regardless.
 
-const ALLOW_LOCALHOST = process.env.LEAP_ALLOW_LOCALHOST === 'true';
+function allowLocalhost(): boolean {
+  return process.env.LEAP_BLOCK_LOCALHOST !== 'true';
+}
 
 const LOCALHOST_HOSTNAMES = new Set([
   'localhost',
@@ -163,8 +167,8 @@ function extractIPv4FromMappedIPv6(ip: string): string | null {
 export function checkSSRFSync(hostname: string): string | null {
   const lowerHostname = hostname.toLowerCase();
 
-  // Allow localhost when explicitly opted in
-  if (ALLOW_LOCALHOST && LOCALHOST_HOSTNAMES.has(lowerHostname)) {
+  // Allow localhost when not explicitly blocked
+  if (allowLocalhost() && LOCALHOST_HOSTNAMES.has(lowerHostname)) {
     return null;
   }
 
@@ -198,7 +202,7 @@ export function checkSSRFSync(hostname: string): string | null {
 
   // Direct IP check
   if (net.isIP(normalizedHost)) {
-    if (ALLOW_LOCALHOST && isLoopbackIP(normalizedHost)) return null;
+    if (allowLocalhost() && isLoopbackIP(normalizedHost)) return null;
     if (isInternalIP(normalizedHost)) return `Blocked: ${hostname} is an internal IP address.`;
     return null;
   }
@@ -254,7 +258,7 @@ export async function checkSSRF(hostname: string): Promise<string | null> {
   try {
     const addresses = await dns.resolve4(normalizedHost);
     for (const addr of addresses) {
-      if (ALLOW_LOCALHOST && isLoopbackIP(addr)) continue;
+      if (allowLocalhost() && isLoopbackIP(addr)) continue;
       if (isInternalIP(addr)) {
         return `Blocked: ${hostname} resolves to internal IP ${addr}.`;
       }
