@@ -65,6 +65,8 @@ export interface Session {
   refNavGeneration?: number;
   /** The refCounter value at the time of the last navigation. Refs with numbers <= this threshold are from a previous page. */
   staleRefThreshold?: number;
+  /** CDP window ID for tiling repositioning. */
+  tileWindowId?: number;
 }
 
 export interface SessionCreateOptions {

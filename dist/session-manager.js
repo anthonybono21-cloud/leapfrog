@@ -8,6 +8,7 @@ import { generateFingerprint } from "./humanize-fingerprint.js";
 import { isHumanizeEnabled } from "./humanize-utils.js";
 import { CdpConnector } from "./cdp-connector.js";
 import { installSSRFRouteGuard } from "./ssrf.js";
+import { tileManager } from "./tile-manager.js";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
@@ -221,6 +222,10 @@ export class SessionManager {
                     launchArgs.push("--headless=new");
                 }
             }
+            // ── Window tiling args ─────────────────────────────────────────
+            if (tileManager.isEnabled() && profileHeaded) {
+                launchArgs.push(...tileManager.getLaunchTileArgs(this.sessions.size));
+            }
             // Check for saved cookie state JSON
             const profileStatePath = path.join(LEAP_STORAGE_PROFILES_DIR, `${safeName}.json`);
             let savedCookieState;
@@ -262,6 +267,10 @@ export class SessionManager {
             const launchArgs = [];
             if (stealth.isEnabled()) {
                 launchArgs.push(...stealth.getLaunchArgs());
+            }
+            // ── Window tiling args ─────────────────────────────────────────
+            if (tileManager.isEnabled()) {
+                launchArgs.push(...tileManager.getLaunchTileArgs(this.sessions.size));
             }
             browser = await chromium.launch({
                 headless: false,
@@ -480,6 +489,16 @@ export class SessionManager {
         // Wire up tab manager (auto-track new tabs/popups)
         tabManager.attachToContext(ctx, session);
         logger.info("session.created", { id, profilePath: opts?.profilePath });
+        // ── Window tiling (CDP positioning + reflow) ───────────────────
+        if (tileManager.isEnabled() && isHeaded && !cdpConnected) {
+            try {
+                await tileManager.detectScreen(page);
+                await tileManager.reflowAll(this.sessions);
+            }
+            catch (e) {
+                logger.warn("tile.reflow_failed", { error: e.message });
+            }
+        }
         return session;
     }
     getSession(id) {
@@ -498,6 +517,7 @@ export class SessionManager {
         }
         this.sessions.delete(id);
         networkIntelligence.cleanupSession(id);
+        tileManager.removeSession(id);
         // ── Auto-save cookies for profile sessions ──────────────────────
         // FIX: Use context.cookies() instead of context.storageState().
         // storageState() on persistent contexts returns empty cookies because
@@ -535,6 +555,12 @@ export class SessionManager {
             // Context may already be closed (browser crash, manual close) — safe to ignore
         }
         logger.info("session.destroyed", { id, cdp: !!session.cdpConnected });
+        // ── Reflow remaining tiled windows ─────────────────────────────
+        if (tileManager.isEnabled() && this.sessions.size > 0) {
+            tileManager.reflowAll(this.sessions).catch((e) => {
+                logger.warn("tile.reflow_after_destroy_failed", { error: e.message });
+            });
+        }
     }
     async destroyAll() {
         // Destroy all sessions first (closes contexts)

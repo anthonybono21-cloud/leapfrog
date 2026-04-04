@@ -47,6 +47,8 @@ const MAX_SNAPSHOT_CHARS = 10000;
 const ALLOW_JS = process.env.LEAP_ALLOW_JS !== "false";
 const ALLOW_EXECUTE = process.env.LEAP_ALLOW_EXECUTE !== "false";
 const LEAP_PROFILES_DIR = process.env.LEAP_PROFILES_DIR ?? path.join(os.homedir(), ".leapfrog", "chrome-profiles");
+const LEAP_TILE = process.env.LEAP_TILE;
+const LEAP_TILE_PADDING = Number(process.env.LEAP_TILE_PADDING ?? 8);
 
 const sessions = new SessionManager({
   maxSessions: MAX_SESSIONS,
@@ -54,6 +56,15 @@ const sessions = new SessionManager({
   headless: HEADLESS,
   channel: CHANNEL,
 });
+
+// Configure window tiling (opt-in via LEAP_TILE env var)
+import { tileManager, TileManager } from "./tile-manager.js";
+if (LEAP_TILE && LEAP_TILE !== "false") {
+  tileManager.configure({
+    layout: LEAP_TILE === "master" ? "master" : "grid",
+    padding: Number.isFinite(LEAP_TILE_PADDING) ? LEAP_TILE_PADDING : 8,
+  });
+}
 
 const snapEngine = new SnapshotEngine();
 
@@ -1152,6 +1163,12 @@ server.registerTool(
       `Uptime: ${resources.uptimeSeconds}s`,
     ];
 
+    if (tileManager.isEnabled()) {
+      const screen = tileManager.getScreenSize();
+      const grid = TileManager.calculateGrid(list.length || 1);
+      lines.push(`Tiling: ${tileManager.getLayout()} (${grid.cols}x${grid.rows}) on ${screen?.width ?? "?"}x${screen?.height ?? "?"}`)
+    }
+
     if (list.length > 0) {
       lines.push("", "Active sessions:");
       const now = Date.now();
@@ -2118,6 +2135,8 @@ async function runDoctor(): Promise<void> {
   console.log(`  LEAP_PROFILES_DIR   = ${process.env.LEAP_PROFILES_DIR ?? "(default: ~/.leapfrog/chrome-profiles)"}`);
   console.log(`  LEAP_ALLOW_EXECUTE  = ${process.env.LEAP_ALLOW_EXECUTE ?? "(default: true)"}`);
   console.log(`  LEAP_CDP_ENDPOINT   = ${process.env.LEAP_CDP_ENDPOINT ?? "(none)"}`);
+  console.log(`  LEAP_TILE           = ${process.env.LEAP_TILE ?? "(disabled)"}`);
+  console.log(`  LEAP_TILE_PADDING   = ${process.env.LEAP_TILE_PADDING ?? "(default: 8)"}`);
   console.log();
 
   const failed = checks.some((c) => c.status === "fail");
@@ -2148,6 +2167,8 @@ Environment Variables:
   LEAP_LOG_LEVEL       Log level: debug|info|warn|error (default: info)
   LEAP_CHANNEL         Browser channel: chromium|chrome (default: chromium)
   LEAP_ALLOW_JS        Allow JS evaluation (default: true)
+  LEAP_TILE            Window tiling: true|grid|master (default: disabled)
+  LEAP_TILE_PADDING    Pixels between tiled windows (default: 8)
 
 Documentation: https://github.com/anthonybono21-cloud/leapfrog`);
   process.exit(0);
@@ -2211,7 +2232,7 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`Leapfrog MCP server running (max ${MAX_SESSIONS} sessions, headless=${HEADLESS})`);
+  console.error(`Leapfrog MCP server running (max ${MAX_SESSIONS} sessions, headless=${HEADLESS}${tileManager.isEnabled() ? `, tile=${tileManager.getLayout()}` : ""})`);
 }
 
 main().catch((e) => {
