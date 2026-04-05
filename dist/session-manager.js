@@ -1,4 +1,4 @@
-import { chromium } from "playwright-core";
+import { getChromium } from "./browser-launcher.js";
 import { stealth } from "./stealth.js";
 import { crashRecovery } from "./crash-recovery.js";
 import { networkIntelligence } from "./network-intelligence.js";
@@ -80,6 +80,7 @@ export class SessionManager {
         if (stealth.isEnabled()) {
             launchOpts.args = stealth.getLaunchArgs();
         }
+        const chromium = await getChromium();
         this.browser = await chromium.launch(launchOpts);
         logger.info("browser.launched", { headless: this.config.headless, channel: this.config.channel ?? "bundled", stealth: stealth.isEnabled() });
         // Attach crash recovery — clears only sessions belonging to the crashed browser
@@ -243,7 +244,8 @@ export class SessionManager {
             // storageState + persistent context conflict: storageState overwrites
             // Chrome-native cookies with potentially empty Playwright-captured state.
             // Instead, launch clean and inject cookies after.
-            context = await chromium.launchPersistentContext(profileDir, {
+            const chromiumForProfile = await getChromium();
+            context = await chromiumForProfile.launchPersistentContext(profileDir, {
                 headless: !profileHeaded,
                 viewport: opts?.viewport ?? this.config.defaultViewport,
                 args: launchArgs.length > 0 ? launchArgs : undefined,
@@ -274,7 +276,8 @@ export class SessionManager {
             if (tileManager.isEnabled()) {
                 launchArgs.push(...tileManager.getLaunchTileArgs(this.sessions.size));
             }
-            browser = await chromium.launch({
+            const chromiumForHeaded = await getChromium();
+            browser = await chromiumForHeaded.launch({
                 headless: false,
                 ...(this.config.channel ? { channel: this.config.channel } : {}),
                 ...(launchArgs.length > 0 ? { args: launchArgs } : {}),
@@ -287,7 +290,19 @@ export class SessionManager {
         }
         const viewport = opts?.viewport ?? this.config.defaultViewport;
         // Determine if stealth applies: per-session flag overrides global env
-        const useStealth = opts?.stealth !== undefined ? opts.stealth : stealth.isEnabled();
+        // KEY INSIGHT (Session 8 research): For persistent profile sessions, stealth
+        // init scripts are counterproductive — they create fingerprint inconsistencies
+        // that score WORSE than honest automation with real cookies/history.
+        // Profile sessions rely on cookie state + browsing history for trust (reCAPTCHA v3
+        // scores ~0.9 with Google cookies vs 0.1-0.3 with fresh profile).
+        // Stealth launch ARGS are still applied (harmless at Chromium level), but init
+        // script injection is skipped unless explicitly requested.
+        const STEALTH_PROFILES = process.env.LEAP_STEALTH_PROFILES === "true";
+        const useStealth = opts?.stealth !== undefined
+            ? opts.stealth
+            : usePersistentProfile && !STEALTH_PROFILES
+                ? false // Profile sessions: trust cookies over fingerprint spoofing
+                : stealth.isEnabled();
         // Always generate a per-session fingerprint for stealth (WebGL, device props, PRNG seed).
         // When LEAP_HUMANIZE is enabled, it also controls UA/viewport/locale/timezone.
         const fp = generateFingerprint();
@@ -369,8 +384,16 @@ export class SessionManager {
         if (useStealth) {
             await stealth.applyToPage(page, opts?.userAgent, fp);
         }
+        if (usePersistentProfile && !useStealth) {
+            logger.info("session.stealth_skipped_for_profile", {
+                profile: opts?.profile,
+                reason: "Profile sessions use cookie trust instead of fingerprint spoofing",
+            });
+        }
         // Apply humanized fingerprint overrides (navigator, screen, WebGL properties)
-        if (humanizeFingerprint) {
+        // Skip for profile sessions — injecting fake navigator/WebGL values on top of
+        // a real Chrome profile creates detectable inconsistencies (FP-Inconsistent, ACM IMC 2025)
+        if (humanizeFingerprint && !usePersistentProfile) {
             const fp = humanizeFingerprint;
             await page.addInitScript(`(() => {
         // Navigator property overrides
@@ -501,6 +524,24 @@ export class SessionManager {
                 logger.warn("tile.reflow_failed", { error: e.message });
             }
         }
+        // ── Auto-reflow on external close ──────────────────────────────
+        // When the user manually closes a browser window (X button), clean up
+        // the session and reflow remaining tiled windows. Without this, closing
+        // a window leaves a gap in the grid that never fills.
+        ctx.on("close", () => {
+            if (!this.sessions.has(id))
+                return; // Already destroyed via Leapfrog
+            logger.info("session.external_close", { id });
+            this.sessions.delete(id);
+            networkIntelligence.cleanupSession(id);
+            tileManager.removeSession(id);
+            // Reflow remaining windows to fill the gap
+            if (tileManager.isEnabled() && this.sessions.size > 0) {
+                tileManager.reflowAll(this.sessions).catch((e) => {
+                    logger.warn("tile.reflow_after_external_close_failed", { error: e.message });
+                });
+            }
+        });
         return session;
     }
     getSession(id) {

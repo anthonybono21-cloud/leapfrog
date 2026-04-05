@@ -139,6 +139,14 @@ export function humanTypeString(text: string, opts: TypeOptions = {}): Keystroke
   let burstRemaining = 0;
   let prevChar = "";
 
+  // ── Fatigue model ─────────────────────────────────────────────────
+  // After ~30 seconds of continuous typing (estimated from char count × avg IKI),
+  // gradually slow down by 10-15%. This simulates reduced motor performance
+  // during sustained input — a strong human signal absent in bots.
+  const FATIGUE_ONSET_CHARS = 150; // ~30s at 200ms avg IKI
+  const FATIGUE_MAX_MULTIPLIER = 1.15; // 15% slower at peak fatigue
+  const FATIGUE_RAMP_CHARS = 100; // chars over which fatigue ramps from 1.0 to max
+
   // Log-normal sigma: controls the right-skew / heavy tail.
   // 0.45 produces mode ~170ms, mean ~215ms with occasional spikes to 400-600ms.
   const ikiSigma = 0.45;
@@ -147,6 +155,13 @@ export function humanTypeString(text: string, opts: TypeOptions = {}): Keystroke
     const char = text[i];
     const lower = char.toLowerCase();
     const isAlpha = /[a-z]/.test(lower);
+
+    // ── Fatigue multiplier ───────────────────────────────────────
+    let fatigueMultiplier = 1.0;
+    if (i > FATIGUE_ONSET_CHARS) {
+      const fatigueProgress = Math.min(1.0, (i - FATIGUE_ONSET_CHARS) / FATIGUE_RAMP_CHARS);
+      fatigueMultiplier = 1.0 + fatigueProgress * (FATIGUE_MAX_MULTIPLIER - 1.0);
+    }
 
     // ── Compute inter-key delay (flight time) ──────────────────────
     let delay: number;
@@ -169,6 +184,9 @@ export function humanTypeString(text: string, opts: TypeOptions = {}): Keystroke
       const multiplier = prevChar ? bigramMultiplier(prevChar, lower) : 1.0;
       delay = logNormalDelay(Math.round(baseDelay * multiplier), ikiSigma, 40);
     }
+
+    // Apply fatigue to the computed delay
+    delay = Math.round(delay * fatigueMultiplier);
 
     // ── Cognitive pause: 12% chance of a think-pause at word starts ──
     if (prevChar === " " && isAlpha && !inBurst && Math.random() < 0.12) {

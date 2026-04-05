@@ -90,6 +90,48 @@ export const CONSENT_SELECTORS: ConsentFramework[] = [
   },
 ];
 
+// ─── Terms/TOS Checkbox Selectors ────────────────────────────────────────
+//
+// Auto-check terms/privacy checkboxes during form interaction. These fire
+// only when a form is being filled, not on page load (to avoid false positives).
+// Successful selectors are recorded in domain knowledge for instant replay.
+
+export const TERMS_SELECTORS: string[] = [
+  'input[type="checkbox"][name*="terms"]',
+  'input[type="checkbox"][name*="agree"]',
+  'input[type="checkbox"][name*="accept"]',
+  'input[type="checkbox"][name*="tos"]',
+  'input[type="checkbox"][name*="privacy"]',
+  'input[type="checkbox"][id*="terms"]',
+  'input[type="checkbox"][id*="agree"]',
+  'input[type="checkbox"][id*="accept"]',
+  'input[type="checkbox"][id*="tos"]',
+  'input[type="checkbox"][id*="policy"]',
+];
+
+/**
+ * Returns JS to inject via page.evaluate() that auto-checks unchecked
+ * terms/privacy/TOS checkboxes. Only targets form checkboxes whose labels
+ * or names indicate legal agreements. Returns which selectors matched.
+ */
+export function getTermsAutoCheckScript(): string {
+  return `(function() {
+  var SELECTORS = ${JSON.stringify(TERMS_SELECTORS)};
+  var checked = [];
+  for (var i = 0; i < SELECTORS.length; i++) {
+    var els = document.querySelectorAll(SELECTORS[i]);
+    for (var j = 0; j < els.length; j++) {
+      if (!els[j].checked) {
+        els[j].checked = true;
+        els[j].dispatchEvent(new Event('change', { bubbles: true }));
+        checked.push(SELECTORS[i]);
+      }
+    }
+  }
+  return { checked: checked.length, selectors: checked };
+})()`;
+}
+
 // ─── Text-Match Pattern ───────────────────────────────────────────────────
 
 const TEXT_MATCH_REGEX = "/^\\s*(accept\\s*(all|cookies)?|i\\s*agree|agree|got\\s*it|ok)\\s*$/i";

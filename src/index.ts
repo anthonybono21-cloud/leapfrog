@@ -31,10 +31,12 @@ import type { Recording } from "./recording.js";
 import { paginate } from "./paginate.js";
 import { getHUDInitScript, getHUDUpdateScript, getClickRippleScript, getMoveCursorScript, getScrollToTargetScript, getScrollToTargetZoomIn, getScrollToTargetZoomOut } from "./session-hud.js";
 import type { HUDStatus } from "./session-hud.js";
-import { getDetectionInitScript, getDetectionCheckScript, getOverlayScript, getDismissScript, getResolutionCheckScript, parseDetectionResult } from "./intervention.js";
+import { getDetectionInitScript, getDetectionCheckScript, getOverlayScript, getDismissScript, getResolutionCheckScript, parseDetectionResult, getPressAndHoldDetectScript, solvePressAndHold } from "./intervention.js";
+import type { PressAndHoldDetection } from "./intervention.js";
 import { SidecarServer } from "./sidecar.js";
 import { chime, alert as notifyAlert } from "./notify.js";
-import { getConsentDismissScript, getCacheSelectorScript } from "./consent-dismiss.js";
+import { getConsentDismissScript, getCacheSelectorScript, getTermsAutoCheckScript } from "./consent-dismiss.js";
+import { solveCaptcha, isCaptchaSolverEnabled } from "./captcha-solver.js";
 import { domainKnowledge, normalizeDomain } from "./domain-knowledge.js";
 import type { NavigationHints } from "./domain-knowledge.js";
 import { TilesCoordinator } from "./tiles-coordinator.js";
@@ -706,17 +708,108 @@ server.registerTool(
 
       // Check for intervention needs (captcha, login, challenge)
       try {
-        const interventionRaw = await result.page.evaluate(getDetectionCheckScript());
-        const intervention = parseDetectionResult(interventionRaw);
-        if (intervention) {
-          // Show @..@ overlay
-          await result.page.evaluate(getOverlayScript(intervention.reason));
-          if (LEAP_HUD) {
-            await result.page.evaluate(getHUDUpdateScript("waiting")).catch(() => {});
+        // Check for PerimeterX "Press & Hold" challenge first (solvable without API)
+        const pxRaw = await result.page.evaluate(getPressAndHoldDetectScript()) as PressAndHoldDetection;
+        if (pxRaw?.detected && pxRaw.bounds) {
+          logger.info("intervention.press-and-hold", { sessionId, bounds: pxRaw.bounds });
+          const solved = await solvePressAndHold(result.page, pxRaw.bounds);
+          if (solved) {
+            logger.info("intervention.press-and-hold:solved", { sessionId });
+            domainKnowledge.recordBlock(urlDomain, "press-and-hold:solved");
+          } else {
+            logger.warn("intervention.press-and-hold:failed", { sessionId });
           }
-          chime(); // Play notification sound (if enabled)
-          notifyAlert("Leapfrog", `Human needed: ${intervention.reason}`);
-          logger.info("intervention.detected", { sessionId, type: intervention.type, reason: intervention.reason });
+        }
+
+        const interventionRaw = await result.page.evaluate(getDetectionCheckScript());
+        let intervention = parseDetectionResult(interventionRaw);
+        if (intervention) {
+          // ── Try to self-resolve before alerting the user ─────────────
+          // Attempt reCAPTCHA checkbox click, Cloudflare verify button, etc.
+          // Only show the overlay if all self-resolution attempts fail.
+          let selfResolved = false;
+
+          if (intervention.type === 'captcha' || intervention.type === 'challenge') {
+            logger.info("intervention.auto-attempt", { sessionId, type: intervention.type });
+
+            // Attempt 1: Click reCAPTCHA "I'm not a robot" checkbox
+            try {
+              const recaptchaFrame = result.page.frameLocator('iframe[src*="recaptcha"]');
+              await recaptchaFrame.locator('#recaptcha-anchor').click({ timeout: 2000 });
+              await new Promise(r => setTimeout(r, 3000));
+              // Re-check if it resolved
+              const recheck1 = parseDetectionResult(await result.page.evaluate(getDetectionCheckScript()));
+              if (!recheck1) { selfResolved = true; logger.info("intervention.auto-resolved", { sessionId, method: "recaptcha-checkbox" }); }
+            } catch { /* reCAPTCHA frame not found or click failed — continue */ }
+
+            // Attempt 2: Click Cloudflare challenge verify button
+            if (!selfResolved) {
+              try {
+                const cfFrame = result.page.frameLocator('iframe[src*="challenges.cloudflare"]');
+                await cfFrame.locator('input[type="checkbox"], label').first().click({ timeout: 2000 });
+                await new Promise(r => setTimeout(r, 3000));
+                const recheck2 = parseDetectionResult(await result.page.evaluate(getDetectionCheckScript()));
+                if (!recheck2) { selfResolved = true; logger.info("intervention.auto-resolved", { sessionId, method: "cloudflare-checkbox" }); }
+              } catch { /* Cloudflare frame not found — continue */ }
+            }
+
+            // Attempt 3: Click any generic "verify" or "continue" button on the page
+            if (!selfResolved) {
+              try {
+                await result.page.evaluate(() => {
+                  const buttons = document.querySelectorAll('button, input[type="submit"], a[role="button"]');
+                  for (const btn of buttons) {
+                    const text = (btn.textContent || '').toLowerCase().trim();
+                    if (/^(verify|continue|i.m human|i am human|proceed|submit)$/i.test(text)) {
+                      (btn as HTMLElement).click();
+                      return true;
+                    }
+                  }
+                  return false;
+                });
+                await new Promise(r => setTimeout(r, 3000));
+                const recheck3 = parseDetectionResult(await result.page.evaluate(getDetectionCheckScript()));
+                if (!recheck3) { selfResolved = true; logger.info("intervention.auto-resolved", { sessionId, method: "verify-button" }); }
+              } catch { /* button click failed — continue */ }
+            }
+
+            // Record self-resolution in domain knowledge
+            if (selfResolved) {
+              domainKnowledge.recordBlock(urlDomain, `challenge:auto-resolved`);
+            }
+          }
+
+          // ── Try CAPTCHA solver API if configured ─────────────────────
+          if (!selfResolved && intervention.type === 'captcha' && isCaptchaSolverEnabled()) {
+            logger.info("intervention.captcha-auto-solve", { sessionId, reason: intervention.reason });
+            const solveResult = await solveCaptcha(result.page, 'captcha', intervention.elementSelector);
+            if (solveResult.solved) {
+              selfResolved = true;
+              logger.info("intervention.captcha-solved", {
+                sessionId, provider: solveResult.provider, timeMs: solveResult.solveTimeMs,
+              });
+              domainKnowledge.recordBlock(urlDomain, `captcha:auto-solved:${solveResult.provider}`);
+            } else {
+              logger.warn("intervention.captcha-solve-failed", {
+                sessionId, error: solveResult.error,
+              });
+            }
+          }
+
+          // ── Only alert the user if all self-resolution failed ────────
+          if (!selfResolved) {
+            // Re-check one final time (challenge may have resolved during our attempts)
+            intervention = parseDetectionResult(await result.page.evaluate(getDetectionCheckScript()));
+            if (intervention) {
+              await result.page.evaluate(getOverlayScript(intervention.reason));
+              if (LEAP_HUD) {
+                await result.page.evaluate(getHUDUpdateScript("waiting")).catch(() => {});
+              }
+              chime();
+              notifyAlert("Leapfrog", `Human needed: ${intervention.reason}`);
+              logger.info("intervention.detected", { sessionId, type: intervention.type, reason: intervention.reason });
+            }
+          }
         }
       } catch { /* intervention check is non-fatal */ }
 
@@ -1130,6 +1223,13 @@ server.registerTool(
           if (!target || value === undefined) return err("'fill' requires target and value");
           await thinkPause.beforeAction("type");
           await resolve(target).fill(value);
+          // Auto-check terms/privacy checkboxes when filling forms (signup flow)
+          try {
+            const termsResult = await page.evaluate(getTermsAutoCheckScript()) as { checked: number; selectors: string[] };
+            if (termsResult.checked > 0) {
+              logger.debug("terms.auto-checked", { count: termsResult.checked, selectors: termsResult.selectors });
+            }
+          } catch { /* terms check is best-effort */ }
           break;
         }
         case "type": {
@@ -1227,6 +1327,127 @@ server.registerTool(
           break;
       }
 
+      // ── Post-action intervention detection ─────────────────────────
+      // When a click/submit triggers a CAPTCHA or challenge, try to
+      // self-resolve before returning to the agent. This catches the
+      // "form fill works, submit triggers CAPTCHA" pattern.
+      if (action === "click" || action === "dblclick") {
+        try {
+          // Brief wait for CAPTCHA/challenge to appear after submit
+          await new Promise(r => setTimeout(r, 1000));
+
+          // Check for PerimeterX press-and-hold
+          const pxCheck = await page.evaluate(getPressAndHoldDetectScript()) as PressAndHoldDetection;
+          if (pxCheck?.detected && pxCheck.bounds) {
+            logger.info("act.press-and-hold-detected", { sessionId });
+            const solved = await solvePressAndHold(page, pxCheck.bounds);
+            if (solved) logger.info("act.press-and-hold-solved", { sessionId });
+          }
+
+          // Check for CAPTCHA/challenge
+          const postIntervention = parseDetectionResult(
+            await page.evaluate(getDetectionCheckScript())
+          );
+
+          if (postIntervention) {
+            let actResolved = false;
+
+            // Try reCAPTCHA checkbox click
+            if (!actResolved) {
+              try {
+                const rcFrame = page.frameLocator('iframe[src*="recaptcha"]');
+                await rcFrame.locator('#recaptcha-anchor').click({ timeout: 2000 });
+                await new Promise(r => setTimeout(r, 3000));
+                if (!parseDetectionResult(await page.evaluate(getDetectionCheckScript()))) {
+                  actResolved = true;
+                  logger.info("act.captcha-auto-resolved", { sessionId, method: "recaptcha-checkbox" });
+                }
+              } catch { /* no reCAPTCHA frame */ }
+            }
+
+            // Try Cloudflare challenge checkbox
+            if (!actResolved) {
+              try {
+                const cfFrame = page.frameLocator('iframe[src*="challenges.cloudflare"]');
+                await cfFrame.locator('input[type="checkbox"], label').first().click({ timeout: 2000 });
+                await new Promise(r => setTimeout(r, 5000)); // Cloudflare JS challenges take time
+                if (!parseDetectionResult(await page.evaluate(getDetectionCheckScript()))) {
+                  actResolved = true;
+                  logger.info("act.captcha-auto-resolved", { sessionId, method: "cloudflare" });
+                }
+              } catch { /* no Cloudflare frame */ }
+            }
+
+            // Try generic verify/continue buttons
+            if (!actResolved) {
+              try {
+                const clicked = await page.evaluate(() => {
+                  const btns = document.querySelectorAll('button, input[type="submit"], a[role="button"]');
+                  for (const btn of btns) {
+                    const text = (btn.textContent || '').toLowerCase().trim();
+                    if (/^(verify|continue|i.m human|i am human|proceed)$/i.test(text)) {
+                      (btn as HTMLElement).click();
+                      return true;
+                    }
+                  }
+                  return false;
+                });
+                if (clicked) {
+                  await new Promise(r => setTimeout(r, 3000));
+                  if (!parseDetectionResult(await page.evaluate(getDetectionCheckScript()))) {
+                    actResolved = true;
+                    logger.info("act.captcha-auto-resolved", { sessionId, method: "verify-button" });
+                  }
+                }
+              } catch { /* button click failed */ }
+            }
+
+            // Try CAPTCHA solver API
+            if (!actResolved && postIntervention.type === 'captcha' && isCaptchaSolverEnabled()) {
+              const solveResult = await solveCaptcha(page, 'captcha', postIntervention.elementSelector);
+              if (solveResult.solved) {
+                actResolved = true;
+                logger.info("act.captcha-api-solved", { sessionId, provider: solveResult.provider });
+              }
+            }
+
+            // Only alert if all attempts failed
+            if (!actResolved) {
+              // Final recheck
+              const finalCheck = parseDetectionResult(await page.evaluate(getDetectionCheckScript()));
+              if (finalCheck) {
+                // Detect "check your email" / verification pages — report differently
+                const bodyText = await page.evaluate(() => (document.body?.innerText || '').slice(0, 500).toLowerCase());
+                const isEmailVerification = /check your email|verification code|verify your|confirm your email|sent.*code|enter.*code/.test(bodyText);
+
+                if (isEmailVerification) {
+                  logger.info("act.email-verification-detected", { sessionId });
+                  // Don't show overlay for email verification — it's not a block, it's a step
+                } else {
+                  await page.evaluate(getOverlayScript(finalCheck.reason));
+                  if (LEAP_HUD) {
+                    await page.evaluate(getHUDUpdateScript("waiting")).catch(() => {});
+                  }
+                  chime();
+                  notifyAlert("Leapfrog", `Human needed: ${finalCheck.reason}`);
+                }
+              }
+            }
+          }
+        } catch { /* post-action intervention is best-effort */ }
+      }
+
+      // Detect email verification pages (even without CAPTCHA)
+      let emailVerificationNote = "";
+      if (action === "click" || action === "dblclick") {
+        try {
+          const bodyText = await page.evaluate(() => (document.body?.innerText || '').slice(0, 500).toLowerCase());
+          if (/check your email|verification code|verify your email|confirm your email|we sent.*code|enter.*code|magic link/.test(bodyText)) {
+            emailVerificationNote = "\n\n[PENDING_VERIFICATION] This page is asking for email verification. Check the inbox for a code or link.";
+          }
+        } catch { /* best effort */ }
+      }
+
       // If the URL changed, return a full snapshot of the new page
       const urlAfter = page.url();
 
@@ -1250,11 +1471,11 @@ server.registerTool(
       if (urlAfter !== urlBefore) {
         try { await page.waitForLoadState("load", { timeout: 5000 }); } catch { /* timeout ok */ }
         const text = await snapAndFormat(session);
-        return ok(`[navigated → ${urlAfter}]\n\n${text}${harnessOutput}`);
+        return ok(`[navigated → ${urlAfter}]\n\n${text}${harnessOutput}${emailVerificationNote}`);
       }
 
       // Same page — brief confirmation
-      return ok(`Done: ${action}${target ? ` ${target}` : ""}${value ? ` "${value}"` : ""}${harnessOutput}`);
+      return ok(`Done: ${action}${target ? ` ${target}` : ""}${value ? ` "${value}"` : ""}${harnessOutput}${emailVerificationNote}`);
     } catch (e: any) {
       return err(`Action failed: ${e.message}`);
     }
@@ -2406,6 +2627,153 @@ server.registerTool(
   },
 );
 
+// ─── profile_warm ──────────────────────────────────────────────────────────
+
+server.registerTool(
+  "profile_warm",
+  {
+    title: "Warm Browser Profile",
+    description:
+      "Warm up a browser profile by browsing trusted sites (Google, Wikipedia, YouTube). " +
+      "Fresh profiles with zero history score near 0 on reCAPTCHA v3. A 60-90 second warm-up " +
+      "dramatically improves trust scores. Stores warm-up state in domain knowledge so it doesn't repeat. " +
+      "Must pass a sessionId of an existing session with a profile.",
+    inputSchema: z.object({
+      sessionId: z.string().describe("Session ID (must be a profile-based session)."),
+    }).strict(),
+  },
+  async ({ sessionId }) => {
+    try {
+      const session = requireSession(sessionId);
+      if (!session.profileName) {
+        return err("profile_warm requires a profile-based session. Create one with session_create profile='name'.");
+      }
+
+      // Check if already warmed
+      const warmKey = `__warmed_${session.profileName}`;
+      const existing = await domainKnowledge.inspect(warmKey);
+      if (existing && existing.visitCount > 0) {
+        return ok(`Profile "${session.profileName}" was already warmed (${existing.visitCount} warm visits). Skipping.`);
+      }
+
+      const page = getPage(session);
+      const startTime = Date.now();
+      const warmSteps = [
+        { url: "https://www.google.com/search?q=weather+today", label: "Google Search" },
+        { url: "https://en.wikipedia.org/wiki/Main_Page", label: "Wikipedia" },
+        { url: "https://www.youtube.com/", label: "YouTube" },
+      ];
+
+      const results: string[] = [];
+
+      for (const step of warmSteps) {
+        try {
+          await page.goto(step.url, { waitUntil: "domcontentloaded", timeout: 15000 });
+          // Scroll down naturally
+          await page.evaluate(() => {
+            window.scrollBy({ top: 400, behavior: 'smooth' });
+          });
+          await new Promise(r => setTimeout(r, 2000 + Math.random() * 3000));
+
+          // Click a random link (simulate browsing)
+          const links = await page.$$('a[href^="http"]');
+          if (links.length > 5) {
+            const randomLink = links[Math.floor(Math.random() * Math.min(links.length, 20))];
+            try {
+              await randomLink.click({ timeout: 3000 });
+              await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
+              await new Promise(r => setTimeout(r, 1500 + Math.random() * 2000));
+              // Scroll the clicked page too
+              await page.evaluate(() => {
+                window.scrollBy({ top: 300, behavior: 'smooth' });
+              });
+              await new Promise(r => setTimeout(r, 1000));
+            } catch { /* link click failed — continue */ }
+          }
+
+          // Accept cookie banners if present
+          if (LEAP_AUTO_CONSENT) {
+            await page.evaluate(getConsentDismissScript()).catch(() => {});
+          }
+
+          results.push(`${step.label}: OK`);
+        } catch (e: any) {
+          results.push(`${step.label}: ${e.message.slice(0, 50)}`);
+        }
+      }
+
+      const duration = Math.round((Date.now() - startTime) / 1000);
+
+      // Record warm-up in domain knowledge so it won't repeat
+      domainKnowledge.recordNavigation(warmKey, "warm", Date.now() - startTime);
+      await domainKnowledge.flush();
+
+      return ok(
+        `Profile "${session.profileName}" warmed in ${duration}s:\n` +
+        results.map(r => `  ${r}`).join("\n") +
+        "\n\nreCAPTCHA v3 trust score should be significantly improved."
+      );
+    } catch (e: any) {
+      return err(`profile_warm failed: ${e.message}`);
+    }
+  },
+);
+
+// ─── profile_import_from_chrome ─────────────────────────────────────────────
+
+server.registerTool(
+  "profile_import_from_chrome",
+  {
+    title: "Import Profile from Chrome",
+    description:
+      "Connect to your real Chrome browser via CDP, capture its auth cookies, and save them " +
+      "as a Leapfrog profile. This gives you real Google auth, reCAPTCHA trust, and all your " +
+      "logged-in sessions — but in an isolated Leapfrog session, not your real browser. " +
+      "Start Chrome with: chrome --remote-debugging-port=9222",
+    inputSchema: z.object({
+      name: z.string().describe("Profile name to save as (e.g. 'google-auth', 'my-chrome')."),
+      cdp: z.string().default("http://localhost:9222").describe("CDP endpoint. Default: http://localhost:9222"),
+      domains: z.array(z.string()).optional().describe("Only capture cookies from these domains. Omit for all cookies."),
+    }).strict(),
+  },
+  async ({ name, cdp, domains }) => {
+    try {
+      // Connect to real Chrome
+      const tempSession = await sessions.createSession({ cdp, stealth: false });
+      const ctx = tempSession.context;
+
+      // Capture all cookies from the real browser
+      let cookies = await ctx.cookies();
+
+      // Filter to specific domains if requested
+      if (domains && domains.length > 0) {
+        cookies = cookies.filter(c =>
+          domains.some(d => c.domain.includes(d) || c.domain.endsWith(`.${d}`))
+        );
+      }
+
+      // Save as a Leapfrog profile
+      const safeName = name.replace(/[^a-zA-Z0-9_-]/g, "");
+      const profileDir = path.join(os.homedir(), ".leapfrog", "profiles");
+      await fs.mkdir(profileDir, { recursive: true, mode: 0o700 });
+      const profilePath = path.join(profileDir, `${safeName}.json`);
+      await fs.writeFile(profilePath, JSON.stringify({ cookies, origins: [] }, null, 2), { mode: 0o600 });
+
+      // Disconnect from real Chrome (don't close it)
+      await sessions.destroySession(tempSession.id);
+
+      return ok(
+        `Imported ${cookies.length} cookies from Chrome → profile "${safeName}"\n` +
+        `Saved to: ${profilePath}\n\n` +
+        `Use with: session_create profile="${safeName}"\n` +
+        `Your real Chrome is untouched — Leapfrog sessions will use a copy of these cookies.`
+      );
+    } catch (e: any) {
+      return err(`Chrome import failed: ${e.message}\n\nMake sure Chrome is running with: chrome --remote-debugging-port=9222`);
+    }
+  },
+);
+
 // ─── domain_knowledge ──────────────────────────────────────────────────────
 
 server.registerTool(
@@ -2571,6 +2939,10 @@ async function runDoctor(): Promise<void> {
   console.log(`  LEAP_CDP_ENDPOINT   = ${process.env.LEAP_CDP_ENDPOINT ?? "(none)"}`);
   console.log(`  LEAP_TILE           = ${process.env.LEAP_TILE ?? "(disabled)"}`);
   console.log(`  LEAP_TILE_PADDING   = ${process.env.LEAP_TILE_PADDING ?? "(default: 8)"}`);
+  console.log(`  LEAP_REBROWSER      = ${process.env.LEAP_REBROWSER ?? "(default: false)"}`);
+  console.log(`  LEAP_CAPTCHA_PROVIDER = ${process.env.LEAP_CAPTCHA_PROVIDER ?? "(disabled)"}`);
+  console.log(`  LEAP_AUTO_WARM      = ${process.env.LEAP_AUTO_WARM ?? "(default: false)"}`);
+  console.log(`  LEAP_STEALTH_PROFILES = ${process.env.LEAP_STEALTH_PROFILES ?? "(default: false — profile sessions skip stealth for better trust)"}`);
   console.log();
 
   const failed = checks.some((c) => c.status === "fail");

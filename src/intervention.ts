@@ -534,6 +534,82 @@ export function getFullscreenScript(): string {
 })()`;
 }
 
+// ─── Press-and-Hold Solver (PerimeterX) ──────────────────────────────────
+
+/**
+ * Returns JS to detect the PerimeterX "Press & Hold" challenge (#px-captcha).
+ * Evaluates to { detected: boolean, bounds?: { x, y, width, height } }.
+ */
+export function getPressAndHoldDetectScript(): string {
+  return `(() => {
+  const el = document.querySelector('#px-captcha');
+  if (!el) return { detected: false };
+  const rect = el.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return { detected: false };
+  return {
+    detected: true,
+    bounds: {
+      x: Math.round(rect.x + rect.width / 2),
+      y: Math.round(rect.y + rect.height / 2),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    },
+  };
+})()`;
+}
+
+export interface PressAndHoldBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface PressAndHoldDetection {
+  detected: boolean;
+  bounds?: PressAndHoldBounds;
+}
+
+/**
+ * Solve a PerimeterX "Press & Hold" challenge by moving the mouse to the
+ * element center, holding down for ~8 seconds, then releasing.
+ *
+ * This is a proven technique — tested successfully on Bath & Body Works.
+ * The caller passes the Playwright Page and the detected bounds.
+ */
+export async function solvePressAndHold(
+  page: import("playwright-core").Page,
+  bounds: PressAndHoldBounds,
+): Promise<boolean> {
+  try {
+    // Move to element center with a small random offset
+    const offsetX = Math.floor(Math.random() * 10) - 5;
+    const offsetY = Math.floor(Math.random() * 10) - 5;
+    await page.mouse.move(bounds.x + offsetX, bounds.y + offsetY, { steps: 5 });
+
+    // Press and hold for 8-10 seconds (randomized to avoid fingerprinting)
+    await page.mouse.down();
+    const holdTime = 8000 + Math.floor(Math.random() * 2000);
+    await new Promise(r => setTimeout(r, holdTime));
+    await page.mouse.up();
+
+    // Wait for challenge to resolve
+    await new Promise(r => setTimeout(r, 2000));
+
+    // Check if the challenge element disappeared
+    const resolved = await page.evaluate(() => {
+      const el = document.querySelector('#px-captcha');
+      if (!el) return true;
+      const rect = el.getBoundingClientRect();
+      return rect.width === 0 || rect.height === 0;
+    });
+
+    return resolved;
+  } catch {
+    return false;
+  }
+}
+
 // ─── Parse Detection Result ───────────────────────────────────────────────
 
 const VALID_TYPES = new Set<InterventionType>(['captcha', 'login', 'oauth', 'challenge', 'manual']);
