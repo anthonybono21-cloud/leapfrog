@@ -29,7 +29,7 @@ import { runStealthAudit } from "./stealth-audit.js";
 import { exportSession, replayRecording } from "./recording.js";
 import type { Recording } from "./recording.js";
 import { paginate } from "./paginate.js";
-import { getHUDInitScript, getHUDUpdateScript, getClickRippleScript, getMoveCursorScript, getScrollToTargetScript } from "./session-hud.js";
+import { getHUDInitScript, getHUDUpdateScript, getClickRippleScript, getMoveCursorScript, getScrollToTargetScript, getScrollToTargetZoomIn, getScrollToTargetZoomOut } from "./session-hud.js";
 import type { HUDStatus } from "./session-hud.js";
 import { getDetectionInitScript, getDetectionCheckScript, getOverlayScript, getDismissScript, getResolutionCheckScript, parseDetectionResult } from "./intervention.js";
 import { SidecarServer } from "./sidecar.js";
@@ -972,15 +972,39 @@ server.registerTool(
         case "hover": {
           if (!target) return err(`'${action}' requires a target`);
           const loc = resolve(target);
-          // Scroll target into view before click/dblclick ("follow the agent's eyes")
+          // Zoom-to-target: "follow the agent's eyes" — zoom in, highlight, hold, zoom out
+          // Uses Playwright locator (not querySelector) since refMap stores Playwright selectors
           if ((action === "click" || action === "dblclick") && target) {
             try {
-              // Resolve the CSS selector for scroll targeting
-              const scrollSelector = target.startsWith("@e")
-                ? session.refMap.get(target) ?? target
-                : target;
-              await page.evaluate(getScrollToTargetScript(scrollSelector));
-            } catch { /* scroll-to-target is non-fatal */ }
+              await loc.scrollIntoViewIfNeeded();
+              const box = await loc.boundingBox();
+              if (box) {
+                // Zoom in via page coordinates
+                await page.evaluate(({ x, y, w, h }) => {
+                  const el = document.elementFromPoint(x + w / 2, y + h / 2);
+                  document.body.style.zoom = '2.5';
+                  if (el) {
+                    (el as HTMLElement).scrollIntoView({ block: 'center' });
+                    (el as HTMLElement).style.outline = '3px solid #22c55e';
+                    (el as HTMLElement).style.outlineOffset = '4px';
+                    (el as HTMLElement).style.backgroundColor = 'rgba(34, 197, 94, 0.1)';
+                  }
+                }, { x: box.x, y: box.y, w: box.width, h: box.height });
+                await page.waitForTimeout(1200);
+                // Zoom out and clean up
+                await page.evaluate(() => {
+                  document.body.style.zoom = '1';
+                  document.querySelectorAll('[style*="outline: 3px solid"]').forEach(e => {
+                    (e as HTMLElement).style.outline = '';
+                    (e as HTMLElement).style.outlineOffset = '';
+                    (e as HTMLElement).style.backgroundColor = '';
+                  });
+                });
+                // Re-scroll at normal zoom so the click lands correctly
+                await loc.scrollIntoViewIfNeeded();
+                await page.waitForTimeout(150);
+              }
+            } catch { /* zoom-to-target is non-fatal */ }
           }
           // HUD: animate agent cursor + click ripple
           if (LEAP_HUD && (action === "click" || action === "dblclick")) {

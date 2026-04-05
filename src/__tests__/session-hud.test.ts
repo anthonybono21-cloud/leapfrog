@@ -120,7 +120,7 @@ describe("session-hud", () => {
     it("returns valid IIFE structure", () => {
       const script = getScrollToTargetScript(".target");
       expect(script).toContain("(function()");
-      expect(script.trim().endsWith("})();")).toBe(true);
+      expect(script.trim()).toMatch(/\}\)\(\);?$/);
     });
   });
 });

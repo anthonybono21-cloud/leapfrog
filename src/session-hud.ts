@@ -124,11 +124,46 @@ export function getToggleCursorScript(_visible: boolean): string {
 
 // ─── Scroll-to-Target ─────────────────────────────────────────────────────
 
-/** Returns JS to smoothly scroll the viewport so the target element is centered. */
+/**
+ * Zoom-to-target: two sync scripts with a Playwright waitForTimeout in between.
+ * getScrollToTargetZoomIn zooms the page 2.5x and highlights the element.
+ * getScrollToTargetZoomOut restores normal zoom.
+ * The caller awaits a real delay between them so the human can see.
+ */
+export function getScrollToTargetZoomIn(selector: string): string {
+  const escaped = selector.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  return `(function() {
+  var el = document.querySelector('${escaped}');
+  if (!el) return false;
+  el.scrollIntoView({ block: 'center' });
+  document.body.style.zoom = '2.5';
+  el.scrollIntoView({ block: 'center' });
+  el.style.outline = '3px solid #22c55e';
+  el.style.outlineOffset = '4px';
+  el.style.backgroundColor = 'rgba(34, 197, 94, 0.1)';
+  return true;
+})()`;
+}
+
+export function getScrollToTargetZoomOut(selector: string): string {
+  const escaped = selector.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  return `(function() {
+  var el = document.querySelector('${escaped}');
+  document.body.style.zoom = '1';
+  if (el) {
+    el.style.outline = '';
+    el.style.outlineOffset = '';
+    el.style.backgroundColor = '';
+    el.scrollIntoView({ block: 'center' });
+  }
+})()`;
+}
+
+/** Legacy single-call version (sync scroll only, no zoom). */
 export function getScrollToTargetScript(selector: string): string {
   const escaped = selector.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
   return `(function() {
   var el = document.querySelector('${escaped}');
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-})();`;
+})()`;
 }

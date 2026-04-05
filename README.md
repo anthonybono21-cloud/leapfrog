@@ -186,19 +186,17 @@ The `diff` tool returns only what changed since the last snapshot — additions,
 
 When running headed, Leapfrog overlays visual feedback on every session:
 
-- **Color-coded border** — 3px edge: green=active, blue=loading, amber=waiting, red=error
-- **Status bar** — session name + status (bottom-left, semi-transparent)
-- **Agent cursor** — green dot that CSS-glides to click targets
 - **Click ripple** — expanding green circle at click coordinates (agent actions only)
+- **Scroll-to-target** — scrollIntoView before clicks so you can see what the agent is about to click
 
-Makes it trivial to see what the agent is doing across tiled sessions.
+Minimal by design. No borders, no status bars, no cursor overlay — just the feedback that matters.
 
 ## Human Intervention
 
 Leapfrog auto-detects situations that need a human — CAPTCHAs, login forms, OAuth redirects, Cloudflare challenges — and pauses the agent until you handle it.
 
 - Detects reCAPTCHA, hCaptcha, Turnstile, login forms, OAuth redirects, Cloudflare challenges
-- Fullscreen `@..@` overlay with reason text + "Done" button
+- Red persistent top bar (32px, #ef4444) with reason text + tab title changes to "NEEDS HUMAN" + chime
 - Sound chime + macOS notification on detection
 - `wait_for_human` tool — agent calls when stuck, blocks until you click Done
 
@@ -313,7 +311,7 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | `LEAP_BLOCK_LOCALHOST` | `false` | Block localhost/127.x.x.x (allowed by default for local dev) |
 | `LEAP_PROFILES_DIR` | `~/.leapfrog/chrome-profiles` | Directory for persistent browser profiles |
 | `LEAP_TILE` | `false` | Tile sessions in a grid and start sidecar HTTP server on `:9222` |
-| `LEAP_HUD` | `false` | Show color-coded borders, status bars, agent cursor, and click ripples |
+| `LEAP_HUD` | `false` | Click ripple on agent actions and scroll-to-target |
 | `LEAP_SOUND` | `false` | Marimba chime on intervention detection (macOS) |
 | `LEAP_NOTIFY` | `false` | macOS notification center alerts on intervention detection |
 | `LEAP_AUTO_CONSENT` | `true` | Auto-dismiss cookie consent banners (10 frameworks + fallback) |
@@ -323,7 +321,7 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 ## Tests
 
 ```
- 774 passing across 27 suites
+ 778 passing across 31 suites
 ```
 
 Session management, snapshot engine, network intelligence, tab management, security, SSRF protection, stealth patches (19), humanization (mouse, typing, scroll), page classification, harness intelligence, API intelligence, script executor, extended actions, HUD overlays, human intervention, cookie consent, domain knowledge, tracing, sidecar HTTP, bug regression, stress tests, benchmarks.
