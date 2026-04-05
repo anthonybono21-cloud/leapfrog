@@ -161,6 +161,7 @@ export class SessionManager implements ISessionManager {
     const expired: string[] = [];
 
     for (const [id, session] of this.sessions) {
+      if (session.pinned) continue;
       if (now - session.lastUsedAt > this.config.idleTimeoutMs) {
         expired.push(id);
       }
@@ -564,6 +565,16 @@ export class SessionManager implements ISessionManager {
     return this.sessions.get(id);
   }
 
+  findByName(name: string): Session | undefined {
+    const lower = name.toLowerCase();
+    for (const session of this.sessions.values()) {
+      if (session.name && session.name.toLowerCase() === lower) {
+        return session;
+      }
+    }
+    return undefined;
+  }
+
   touchSession(id: string): void {
     const session = this.sessions.get(id);
     if (session) {
@@ -661,6 +672,9 @@ export class SessionManager implements ISessionManager {
         // Callers needing the title should use getSession(id).page.title().
         title: "",
         ...(session.profilePath ? { profilePath: session.profilePath } : {}),
+        ...(session.name ? { name: session.name } : {}),
+        ...(session.domain ? { domain: session.domain } : {}),
+        ...(session.pinned ? { pinned: true } : {}),
       });
     }
 

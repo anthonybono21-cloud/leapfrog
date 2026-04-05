@@ -188,6 +188,28 @@ export class StealthMode {
 
     return `
       // ────────────────────────────────────────────────────────────────────
+      // BUG FIX: __pwInitScripts race condition
+      // Delete Playwright automation globals IMMEDIATELY at the top of the
+      // very first init script. This closes the window where page JS or
+      // subsequent init scripts could observe __pwInitScripts before the
+      // separate cleanup script runs. Critical for v0.6.0 which adds 3+
+      // more init scripts, widening the race window.
+      // ────────────────────────────────────────────────────────────────────
+      (function() {
+        var globals = ['__pwInitScripts', '__playwright__binding__', '__playwright'];
+        for (var i = 0; i < globals.length; i++) {
+          try { delete window[globals[i]]; } catch(e) {}
+          try {
+            Object.defineProperty(window, globals[i], {
+              get: function() { return undefined; },
+              set: function() {},
+              configurable: true,
+            });
+          } catch(e) {}
+        }
+      })();
+
+      // ────────────────────────────────────────────────────────────────────
       // Phase 2.2/2.3: Session-seeded PRNG (mulberry32)
       // Deterministic within a session — same canvas/audio operations produce
       // identical output. Prevents tampering detection from non-deterministic noise.

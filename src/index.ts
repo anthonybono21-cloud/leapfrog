@@ -29,6 +29,13 @@ import { runStealthAudit } from "./stealth-audit.js";
 import { exportSession, replayRecording } from "./recording.js";
 import type { Recording } from "./recording.js";
 import { paginate } from "./paginate.js";
+import { getHUDInitScript, getHUDUpdateScript, getClickRippleScript, getMoveCursorScript } from "./session-hud.js";
+import type { HUDStatus } from "./session-hud.js";
+import { getDetectionInitScript, getDetectionCheckScript, getOverlayScript, getDismissScript, getResolutionCheckScript, parseDetectionResult } from "./intervention.js";
+import { SidecarServer } from "./sidecar.js";
+import { chime, alert as notifyAlert } from "./notify.js";
+import { getConsentDismissScript, getCacheSelectorScript } from "./consent-dismiss.js";
+import { domainKnowledge } from "./domain-knowledge.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
@@ -49,6 +56,11 @@ const ALLOW_EXECUTE = process.env.LEAP_ALLOW_EXECUTE !== "false";
 const LEAP_PROFILES_DIR = process.env.LEAP_PROFILES_DIR ?? path.join(os.homedir(), ".leapfrog", "chrome-profiles");
 const LEAP_TILE = process.env.LEAP_TILE;
 const LEAP_TILE_PADDING = Number(process.env.LEAP_TILE_PADDING ?? 8);
+const LEAP_HUD = process.env.LEAP_HUD === "true";
+const LEAP_AUTO_CONSENT = process.env.LEAP_AUTO_CONSENT !== "false"; // default ON
+const LEAP_TRACE = process.env.LEAP_TRACE === "true";
+const LEAP_RECORD = process.env.LEAP_RECORD === "true";
+const LEAP_SIDECAR_PORT = Number(process.env.LEAP_SIDECAR_PORT ?? 9222);
 
 const sessions = new SessionManager({
   maxSessions: MAX_SESSIONS,
@@ -84,9 +96,9 @@ function err(msg: string) {
 }
 
 function requireSession(sessionId: string): Session {
-  const s = sessions.getSession(sessionId);
+  const s = sessions.getSession(sessionId) ?? sessions.findByName(sessionId);
   if (!s) throw new Error(`Session "${sessionId}" not found. Use session_list to see active sessions.`);
-  sessions.touchSession(sessionId);
+  sessions.touchSession(s.id);
   return s;
 }
 
@@ -201,9 +213,13 @@ server.registerTool(
         .string()
         .optional()
         .describe("Client identifier for per-client pool partitioning. Used with LEAP_MAX_SESSIONS_PER_CLIENT."),
+      pinned: z
+        .boolean()
+        .optional()
+        .describe("Pin this session to prevent idle timeout cleanup."),
     }).strict(),
   },
-  async ({ profilePath, viewport, userAgent, locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth, proxy, profile, headed, extensions, cdp, clientId }) => {
+  async ({ profilePath, viewport, userAgent, locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth, proxy, profile, headed, extensions, cdp, clientId, pinned }) => {
     try {
       // Validate profilePath stays within the profiles directory
       if (profilePath) {
@@ -222,9 +238,29 @@ server.registerTool(
         locale, timezoneId, geolocation, permissions, colorScheme, acceptDownloads, stealth, proxy,
         profile, headed, extensions, cdp, clientId,
       });
+      if (pinned) {
+        session.pinned = true;
+      }
+
+      // ── v0.6.0 init script injection ──────────────────────────────────
+      // Inject on context so they apply to all tabs/navigations
+      if (LEAP_HUD) {
+        await session.context.addInitScript(getHUDInitScript(session.name ?? session.id));
+      }
+      if (LEAP_AUTO_CONSENT) {
+        await session.context.addInitScript(getConsentDismissScript());
+      }
+      // Always inject intervention detection (lightweight MutationObserver)
+      await session.context.addInitScript(getDetectionInitScript());
+
+      // Start tracing if enabled
+      if (LEAP_TRACE) {
+        await session.context.tracing.start({ screenshots: true, snapshots: true });
+      }
+
       const stats = sessions.getStats();
       return ok(
-        `Session created: ${session.id}\n` +
+        `Session created: ${session.id}${pinned ? " (pinned)" : ""}\n` +
         `Pool: ${stats.active}/${stats.maxSessions} active`,
       );
     } catch (e: any) {
@@ -253,7 +289,8 @@ server.registerTool(
     const now = Date.now();
     const lines = list.map((s) => {
       const idle = Math.round((now - s.lastUsedAt) / 1000);
-      return `${s.id}  ${s.url || "(blank)"}  idle ${idle}s`;
+      const pin = s.pinned ? " *" : "";
+      return `${s.id} [${s.name || "unnamed"}]${pin}  ${s.url || "(blank)"}  idle ${idle}s`;
     });
 
     return ok(
@@ -275,6 +312,21 @@ server.registerTool(
     }).strict(),
   },
   async ({ sessionId }) => {
+    // Flush domain knowledge for this session's domains
+    domainKnowledge.flush().catch(() => {});
+
+    // Stop tracing and save if enabled
+    if (LEAP_TRACE) {
+      try {
+        const s = sessions.getSession(sessionId);
+        if (s) {
+          const tracePath = path.join(os.tmpdir(), `leapfrog-trace-${sessionId}.zip`);
+          await s.context.tracing.stop({ path: tracePath });
+          logger.info("tracing.saved", { sessionId, path: tracePath });
+        }
+      } catch { /* tracing stop is non-fatal */ }
+    }
+
     // Clean up module-level state for the session
     SnapshotDiffer.clearSession(sessionId);
     ApiIntelligence.clearSession(sessionId);
@@ -459,6 +511,10 @@ server.registerTool(
       const session = requireSession(sessionId);
       const page = getPage(session);
 
+      if (LEAP_HUD) {
+        await page.evaluate(getHUDUpdateScript("loading")).catch(() => {});
+      }
+
       // Bump nav generation — any refs from before this navigation are now stale
       // (navGeneration check in act handler prevents using stale refs)
       // Don't clear refMap — historical refs needed for session_export resolution
@@ -466,6 +522,10 @@ server.registerTool(
       session.navGeneration = (session.navGeneration ?? 0) + 1;
       // Reset API captures for the new page
       ApiIntelligence.clearSession(sessionId);
+
+      // Pre-load domain knowledge for adaptive behavior
+      const urlDomain = parsed.hostname;
+      const domainRecord = await domainKnowledge.load(urlDomain).catch(() => undefined);
 
       // Adaptive navigate with wait strategy selection + stealth escalation
       const result = await adaptiveNavigate(page, session, url, sessions, {
@@ -489,6 +549,40 @@ server.registerTool(
 
       // Update ref nav generation on the final session
       result.session.refNavGeneration = result.session.navGeneration ?? 0;
+
+      // Auto-name session from first navigation domain
+      if (!result.session.name) {
+        try {
+          const domain = new URL(result.url).hostname;
+          result.session.name = domain;
+          result.session.domain = domain;
+        } catch { /* URL parse error is non-fatal */ }
+      }
+
+      // Record navigation in domain knowledge
+      const navDuration = Date.now() - startTime;
+      domainKnowledge.recordNavigation(urlDomain, waitUntil, navDuration);
+
+      // Update HUD to active
+      if (LEAP_HUD) {
+        await result.page.evaluate(getHUDUpdateScript("active")).catch(() => {});
+      }
+
+      // Check for intervention needs (captcha, login, challenge)
+      try {
+        const interventionRaw = await result.page.evaluate(getDetectionCheckScript());
+        const intervention = parseDetectionResult(interventionRaw);
+        if (intervention) {
+          // Show @..@ overlay
+          await result.page.evaluate(getOverlayScript(intervention.reason));
+          if (LEAP_HUD) {
+            await result.page.evaluate(getHUDUpdateScript("waiting")).catch(() => {});
+          }
+          chime(); // Play notification sound (if enabled)
+          notifyAlert("Leapfrog", `Human needed: ${intervention.reason}`);
+          logger.info("intervention.detected", { sessionId, type: intervention.type, reason: intervention.reason });
+        }
+      } catch { /* intervention check is non-fatal */ }
 
       // Auto-challenge solver — try button/checkbox click on challenge pages
       if (result.classification.type === 'challenge' && result.quality !== "BLOCKED") {
@@ -514,6 +608,15 @@ server.registerTool(
 
       return ok(output);
     } catch (e: any) {
+      if (LEAP_HUD) {
+        try {
+          const s = sessions.getSession(sessionId);
+          if (s) {
+            const p = getPage(s);
+            await p.evaluate(getHUDUpdateScript("error")).catch(() => {});
+          }
+        } catch { /* best effort */ }
+      }
       return err(`Navigate failed: ${e.message}`);
     }
   },
@@ -775,6 +878,18 @@ server.registerTool(
         case "hover": {
           if (!target) return err(`'${action}' requires a target`);
           const loc = resolve(target);
+          // HUD: animate agent cursor + click ripple
+          if (LEAP_HUD && (action === "click" || action === "dblclick")) {
+            try {
+              const box = await loc.boundingBox();
+              if (box) {
+                const cx = box.x + box.width / 2;
+                const cy = box.y + box.height / 2;
+                await page.evaluate(getMoveCursorScript(cx, cy));
+                await page.evaluate(getClickRippleScript(cx, cy));
+              }
+            } catch { /* HUD animation is non-fatal */ }
+          }
           if (action === "click") {
             await thinkPause.beforeAction("click");
             if (holdDuration) {
@@ -1157,10 +1272,15 @@ server.registerTool(
     const resources = sessions.getResourceUsage();
     const list = sessions.listSessions();
 
+    // ASCII capacity bar
+    const barWidth = 15;
+    const filled = Math.round((stats.active / stats.maxSessions) * barWidth);
+    const bar = "\u2588".repeat(filled) + "\u2591".repeat(barWidth - filled);
+
     const lines = [
-      `Sessions: ${stats.active}/${stats.maxSessions} (${stats.totalCreated} total created)`,
+      `Pool: [${bar}] ${stats.active}/${stats.maxSessions}`,
       `Memory: ${resources.heapUsedMB}MB heap / ${resources.rssMB}MB RSS`,
-      `Uptime: ${resources.uptimeSeconds}s`,
+      `Uptime: ${resources.uptimeSeconds}s  (${stats.totalCreated} total created)`,
     ];
 
     if (tileManager.isEnabled()) {
@@ -1170,11 +1290,16 @@ server.registerTool(
     }
 
     if (list.length > 0) {
-      lines.push("", "Active sessions:");
+      lines.push("");
       const now = Date.now();
+      const idleTimeoutSec = IDLE_TIMEOUT_MS / 1000;
       for (const s of list) {
         const idle = Math.round((now - s.lastUsedAt) / 1000);
-        lines.push(`  ${s.id}  ${s.url || "(blank)"}  idle ${idle}s`);
+        const pin = s.pinned ? " *" : "";
+        const warn = !s.pinned && idleTimeoutSec > 0 && idle > idleTimeoutSec * 0.8
+          ? "  \u26A0 approaching timeout"
+          : "";
+        lines.push(`${s.id} [${s.name || "unnamed"}]${pin}  idle ${idle}s${warn}`);
       }
     }
 
@@ -2058,6 +2183,146 @@ server.registerTool(
   },
 );
 
+// ─── wait_for_human ────────────────────────────────────────────────────────
+
+server.registerTool(
+  "wait_for_human",
+  {
+    title: "Wait for Human",
+    description:
+      "Pause and request human intervention. Shows the @..@ overlay with your reason. " +
+      "Use when you encounter a CAPTCHA, login wall, or any situation requiring human action. " +
+      "The tool blocks until the user clicks 'Done' on the overlay. Returns success when resolved.",
+    inputSchema: z.object({
+      sessionId: z.string().describe("Session ID."),
+      reason: z.string().describe("Why human help is needed (e.g. 'CAPTCHA detected', 'Login required')."),
+    }).strict(),
+  },
+  async ({ sessionId, reason }) => {
+    try {
+      const session = requireSession(sessionId);
+      const page = getPage(session);
+
+      // Show @..@ overlay
+      await page.evaluate(getOverlayScript(reason));
+      if (LEAP_HUD) {
+        await page.evaluate(getHUDUpdateScript("waiting")).catch(() => {});
+      }
+      chime();
+      notifyAlert("Leapfrog", `Human needed: ${reason}`);
+
+      // Poll until user clicks Done (check every 500ms, max 5 minutes)
+      const timeout = 5 * 60 * 1000;
+      const start = Date.now();
+      while (Date.now() - start < timeout) {
+        const resolved = await page.evaluate(getResolutionCheckScript()).catch(() => false);
+        if (resolved) {
+          if (LEAP_HUD) {
+            await page.evaluate(getHUDUpdateScript("active")).catch(() => {});
+          }
+          return ok(`Human intervention complete. Reason was: ${reason}`);
+        }
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      // Timeout — dismiss overlay
+      await page.evaluate(getDismissScript()).catch(() => {});
+      if (LEAP_HUD) {
+        await page.evaluate(getHUDUpdateScript("active")).catch(() => {});
+      }
+      return err(`Timed out waiting for human intervention (5 min). Reason: ${reason}`);
+    } catch (e: any) {
+      return err(`wait_for_human failed: ${e.message}`);
+    }
+  },
+);
+
+// ─── domain_knowledge ──────────────────────────────────────────────────────
+
+server.registerTool(
+  "domain_knowledge",
+  {
+    title: "Domain Knowledge",
+    description:
+      "Inspect what Leapfrog has learned about a website from previous visits. " +
+      "Shows stealth tier, wait strategy, block history, consent selector, API endpoints, and visit count. " +
+      "Pass no domain to list all known domains.",
+    inputSchema: z.object({
+      domain: z.string().optional().describe("Domain to inspect (e.g. 'github.com'). Omit to list all."),
+    }).strict(),
+  },
+  async ({ domain }) => {
+    try {
+      if (!domain) {
+        const domains = domainKnowledge.listDomains();
+        if (domains.length === 0) return ok("No domain knowledge yet. Visit some sites first.");
+        const lines = domains.map(d =>
+          `${d.domain}  visits=${d.visitCount}  stealth=L${d.stealthTier}  last=${new Date(d.lastVisit).toISOString().slice(0, 10)}`
+        );
+        return ok(`Known domains (${domains.length}):\n\n${lines.join("\n")}`);
+      }
+
+      const record = await domainKnowledge.inspect(domain);
+      if (!record) return ok(`No knowledge about "${domain}" yet.`);
+
+      const lines = [
+        `Domain: ${record.domain}`,
+        `Visits: ${record.visitCount} (first: ${new Date(record.firstVisit).toISOString().slice(0, 10)}, last: ${new Date(record.lastVisit).toISOString().slice(0, 10)})`,
+        `Stealth tier: ${record.stealthTier}/3`,
+      ];
+      if (record.waitStrategy) {
+        lines.push(`Wait strategy: ${record.waitStrategy.method} (avg ${Math.round(record.waitStrategy.avgLoadTime)}ms, ${record.waitStrategy.samples} samples)`);
+      }
+      if (record.consentSelector) {
+        lines.push(`Consent selector: ${record.consentSelector}`);
+      }
+      if (record.blockHistory.length > 0) {
+        lines.push(`Block history (${record.blockHistory.length}):`);
+        record.blockHistory.slice(-5).forEach(b => {
+          lines.push(`  ${new Date(b.timestamp).toISOString()} — ${b.reason}`);
+        });
+      }
+      if (record.apiEndpoints.length > 0) {
+        lines.push(`API endpoints (${record.apiEndpoints.length}):`);
+        record.apiEndpoints.slice(0, 10).forEach(e => {
+          lines.push(`  ${e.method} ${e.path} [${e.classification}]`);
+        });
+      }
+      return ok(lines.join("\n"));
+    } catch (e: any) {
+      return err(`domain_knowledge failed: ${e.message}`);
+    }
+  },
+);
+
+// ─── session_export_trace ──────────────────────────────────────────────────
+
+server.registerTool(
+  "session_export_trace",
+  {
+    title: "Export Session Trace",
+    description:
+      "Export a Playwright trace file for a session. Requires LEAP_TRACE=true. " +
+      "The trace can be viewed at trace.playwright.dev for detailed action timeline.",
+    inputSchema: z.object({
+      sessionId: z.string().describe("Session ID."),
+    }).strict(),
+  },
+  async ({ sessionId }) => {
+    try {
+      if (!LEAP_TRACE) return err("Tracing is not enabled. Set LEAP_TRACE=true to enable.");
+      const session = requireSession(sessionId);
+      const tracePath = path.join(os.tmpdir(), `leapfrog-trace-${sessionId}-${Date.now()}.zip`);
+      await session.context.tracing.stop({ path: tracePath });
+      // Restart tracing for continued capture
+      await session.context.tracing.start({ screenshots: true, snapshots: true });
+      return ok(`Trace exported: ${tracePath}\nView at: https://trace.playwright.dev (drag & drop the file)`);
+    } catch (e: any) {
+      return err(`Trace export failed: ${e.message}`);
+    }
+  },
+);
+
 // ─── CLI Flags ─────────────────────────────────────────────────────────────
 
 async function runDoctor(): Promise<void> {
@@ -2232,7 +2497,53 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`Leapfrog MCP server running (max ${MAX_SESSIONS} sessions, headless=${HEADLESS}${tileManager.isEnabled() ? `, tile=${tileManager.getLayout()}` : ""})`);
+
+  // Start sidecar HTTP control server for headed mode
+  if (LEAP_TILE && LEAP_TILE !== "false") {
+    const sidecar = new SidecarServer({
+      listSessions: () => sessions.listSessions().map(s => ({ id: s.id, name: s.name, url: s.url })),
+      focusSession: async (id) => {
+        const s = requireSession(id);
+        const page = getPage(s);
+        await page.bringToFront();
+      },
+      zoomSession: async (id) => {
+        const s = requireSession(id);
+        const page = getPage(s);
+        await page.bringToFront();
+      },
+      restoreGrid: async () => {
+        if (tileManager.isEnabled()) {
+          const sessionMap = new Map<string, Session>();
+          for (const si of sessions.listSessions()) {
+            const sess = sessions.getSession(si.id);
+            if (sess) sessionMap.set(si.id, sess);
+          }
+          await tileManager.reflowAll(sessionMap);
+        }
+      },
+      setLayout: async (layout) => {
+        if (tileManager.isEnabled()) {
+          tileManager.configure({ layout: layout === "master" ? "master" : "grid", padding: LEAP_TILE_PADDING });
+          const sessionMap = new Map<string, Session>();
+          for (const si of sessions.listSessions()) {
+            const sess = sessions.getSession(si.id);
+            if (sess) sessionMap.set(si.id, sess);
+          }
+          await tileManager.reflowAll(sessionMap);
+        }
+      },
+      destroyAll: async () => { await sessions.destroyAll(); },
+      screenshot: async (id) => {
+        const s = requireSession(id);
+        const page = getPage(s);
+        return await page.screenshot();
+      },
+    });
+    await sidecar.start(LEAP_SIDECAR_PORT);
+  }
+
+  console.error(`Leapfrog MCP server running (max ${MAX_SESSIONS} sessions, headless=${HEADLESS}${tileManager.isEnabled() ? `, tile=${tileManager.getLayout()}` : ""}${LEAP_HUD ? ", HUD" : ""}${LEAP_TRACE ? ", tracing" : ""})`);
 }
 
 main().catch((e) => {
@@ -2243,11 +2554,13 @@ main().catch((e) => {
 // ─── Graceful shutdown ──────────────────────────────────────────────────────
 
 process.on("SIGINT", async () => {
+  await domainKnowledge.flush().catch(() => {});
   await sessions.destroyAll();
   process.exit(0);
 });
 
 process.on("SIGTERM", async () => {
+  await domainKnowledge.flush().catch(() => {});
   await sessions.destroyAll();
   process.exit(0);
 });

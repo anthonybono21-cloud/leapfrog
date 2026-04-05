@@ -154,11 +154,21 @@ export class TabManager {
       );
     }
 
+    const previousIndex = session.activePageIndex!;
     session.activePageIndex = resolvedIndex;
     const page = pages[resolvedIndex];
 
     // Keep session.page in sync for backward compatibility
     session.page = page;
+
+    // BUG FIX: Invalidate snapshot refs when switching to a different tab.
+    // Refs from tab A's DOM are meaningless on tab B. Use the same stale-ref
+    // pattern as navigation: bump navGeneration and set staleRefThreshold so
+    // the act/extract handlers reject old refs and require a fresh snapshot.
+    if (resolvedIndex !== previousIndex) {
+      session.staleRefThreshold = session.refCounter;
+      session.navGeneration = (session.navGeneration ?? 0) + 1;
+    }
 
     // Bring to front (non-blocking — fire and forget)
     page.bringToFront().catch(() => {});
