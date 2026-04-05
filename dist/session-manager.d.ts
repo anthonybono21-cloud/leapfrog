@@ -13,6 +13,7 @@ export declare class SessionManager implements ISessionManager {
     private sweepIdle;
     createSession(opts?: SessionCreateOptions): Promise<Session>;
     getSession(id: string): Session | undefined;
+    findByName(name: string): Session | undefined;
     touchSession(id: string): void;
     destroySession(id: string): Promise<void>;
     destroyAll(): Promise<void>;

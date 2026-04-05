@@ -36,6 +36,12 @@ export interface Session {
     activePageIndex?: number;
     createdAt: number;
     lastUsedAt: number;
+    /** Human-readable name (auto-set from first navigation domain) */
+    name?: string;
+    /** Primary domain of the session */
+    domain?: string;
+    /** If true, survives idle sweep */
+    pinned?: boolean;
     /** Ref counter for compact snapshot elements — increments across snapshots */
     refCounter: number;
     /** Map from @eN ref string to Playwright locator selector */
@@ -133,6 +139,9 @@ export interface SessionInfo {
     url: string;
     title: string;
     profilePath?: string;
+    name?: string;
+    domain?: string;
+    pinned?: boolean;
 }
 export interface PoolStats {
     active: number;
