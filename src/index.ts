@@ -73,7 +73,7 @@ const sessions = new SessionManager({
 });
 
 // Configure window tiling (opt-in via LEAP_TILE env var)
-import { tileManager, TileManager } from "./tile-manager.js";
+import { tileManager, TileManager, type MultiTileContext } from "./tile-manager.js";
 if (LEAP_TILE && LEAP_TILE !== "false") {
   tileManager.configure({
     layout: LEAP_TILE === "master" ? "master" : "grid",
@@ -81,24 +81,53 @@ if (LEAP_TILE && LEAP_TILE !== "false") {
   });
 }
 
-// Multi-terminal tile coordinator (opt-in via LEAP_MULTI_TILE=true)
+// Multi-terminal tile coordinator — active whenever tiling is on.
 // Uses file-based coordination so multiple Leapfrog instances share the screen.
+// Zero cost for single-terminal (just tracks one instance). No extra env var needed.
 let tilesCoord: TilesCoordinator | null = null;
-if (LEAP_MULTI_TILE && LEAP_TILE && LEAP_TILE !== "false") {
+if (LEAP_TILE && LEAP_TILE !== "false") {
   // Screen size is detected lazily by tileManager; use defaults until then.
   // The coordinator will be fully initialized once the first session detects screen size.
   tilesCoord = new TilesCoordinator(1920, 1080);
   tilesCoord.watch((state) => {
     // When another instance changes the grid, reflow our own windows
+    // using global slot count + indices so all instances share one grid.
     if (tileManager.isEnabled()) {
       const sessionMap = new Map<string, Session>();
       for (const si of sessions.listSessions()) {
         const sess = sessions.getSession(si.id);
         if (sess) sessionMap.set(si.id, sess);
       }
-      tileManager.reflowAll(sessionMap).catch(() => {});
+      const slotIndex = new Map<string, number>();
+      state.slots.forEach((slot, idx) => slotIndex.set(slot.sessionId, idx));
+      logger.info("tile.watcher_reflow", { globalTotal: state.slots.length, local: sessionMap.size });
+      tileManager.reflowAll(sessionMap, {
+        globalTotal: state.slots.length,
+        slotIndex,
+      }).catch((e) => logger.warn("tile.watcher_reflow_failed", { error: e?.message }));
     }
   });
+}
+
+/** Build multi-tile context from coordinator, or undefined if not in multi-tile mode. */
+async function getMultiTileContext() {
+  if (!tilesCoord) return undefined;
+  const state = await tilesCoord.getLayout();
+  const slotIndex = new Map<string, number>();
+  state.slots.forEach((slot, idx) => slotIndex.set(slot.sessionId, idx));
+  return { globalTotal: state.slots.length, slotIndex };
+}
+
+/** Reflow all local windows, using global grid state when multi-tile is active. */
+async function reflowWithContext() {
+  if (!tileManager.isEnabled()) return;
+  const sessionMap = new Map<string, Session>();
+  for (const si of sessions.listSessions()) {
+    const sess = sessions.getSession(si.id);
+    if (sess) sessionMap.set(si.id, sess);
+  }
+  const ctx = await getMultiTileContext();
+  await tileManager.reflowAll(sessionMap, ctx);
 }
 
 const snapEngine = new SnapshotEngine();
@@ -286,15 +315,8 @@ server.registerTool(
         await tilesCoord.claimSlot(session.id).catch(() => {});
       }
 
-      // Raise all tiled windows after creating a new session
-      if (tileManager.isEnabled()) {
-        const sessionMap = new Map<string, Session>();
-        for (const si of sessions.listSessions()) {
-          const sess = sessions.getSession(si.id);
-          if (sess) sessionMap.set(si.id, sess);
-        }
-        await tileManager.raiseAllWindows(sessionMap).catch(() => {});
-      }
+      // Reflow + raise all tiled windows after creating a new session
+      await reflowWithContext().catch(() => {});
 
       const stats = sessions.getStats();
       return ok(
@@ -375,6 +397,10 @@ server.registerTool(
     ApiIntelligence.clearSession(sessionId);
     HarnessIntelligence.clearSession(sessionId);
     await sessions.destroySession(sessionId);
+
+    // Reflow remaining windows to fill the gap
+    await reflowWithContext().catch(() => {});
+
     const stats = sessions.getStats();
     return ok(`Destroyed ${sessionId}. Pool: ${stats.active}/${stats.maxSessions}`);
   },
@@ -2591,24 +2617,12 @@ async function main() {
         await page.bringToFront();
       },
       restoreGrid: async () => {
-        if (tileManager.isEnabled()) {
-          const sessionMap = new Map<string, Session>();
-          for (const si of sessions.listSessions()) {
-            const sess = sessions.getSession(si.id);
-            if (sess) sessionMap.set(si.id, sess);
-          }
-          await tileManager.reflowAll(sessionMap);
-        }
+        await reflowWithContext();
       },
       setLayout: async (layout) => {
         if (tileManager.isEnabled()) {
           tileManager.configure({ layout: layout === "master" ? "master" : "grid", padding: LEAP_TILE_PADDING });
-          const sessionMap = new Map<string, Session>();
-          for (const si of sessions.listSessions()) {
-            const sess = sessions.getSession(si.id);
-            if (sess) sessionMap.set(si.id, sess);
-          }
-          await tileManager.reflowAll(sessionMap);
+          await reflowWithContext();
         }
       },
       destroyAll: async () => { await sessions.destroyAll(); },
@@ -2618,7 +2632,15 @@ async function main() {
         return await page.screenshot();
       },
     });
-    await sidecar.start(LEAP_SIDECAR_PORT);
+    try {
+      await sidecar.start(LEAP_SIDECAR_PORT);
+    } catch (e: any) {
+      if (e?.code === "EADDRINUSE") {
+        logger.warn("sidecar.port_in_use", { port: LEAP_SIDECAR_PORT, message: "Another Leapfrog instance owns this port. Sidecar disabled for this process." });
+      } else {
+        throw e;
+      }
+    }
   }
 
   console.error(`Leapfrog MCP server running (max ${MAX_SESSIONS} sessions, headless=${HEADLESS}${tileManager.isEnabled() ? `, tile=${tileManager.getLayout()}` : ""}${LEAP_HUD ? ", HUD" : ""}${LEAP_TRACE ? ", tracing" : ""})`);

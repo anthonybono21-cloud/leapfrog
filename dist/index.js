@@ -27,12 +27,13 @@ import { adaptiveNavigate, formatAdaptiveResult } from "./adaptive-wait.js";
 import { runStealthAudit } from "./stealth-audit.js";
 import { exportSession, replayRecording } from "./recording.js";
 import { paginate } from "./paginate.js";
-import { getHUDInitScript, getHUDUpdateScript, getClickRippleScript, getMoveCursorScript } from "./session-hud.js";
+import { getHUDInitScript, getHUDUpdateScript, getClickRippleScript, getMoveCursorScript, getScrollToTargetScript } from "./session-hud.js";
 import { getDetectionInitScript, getDetectionCheckScript, getOverlayScript, getDismissScript, getResolutionCheckScript, parseDetectionResult } from "./intervention.js";
 import { SidecarServer } from "./sidecar.js";
 import { chime, alert as notifyAlert } from "./notify.js";
 import { getConsentDismissScript } from "./consent-dismiss.js";
-import { domainKnowledge } from "./domain-knowledge.js";
+import { domainKnowledge, normalizeDomain } from "./domain-knowledge.js";
+import { TilesCoordinator } from "./tiles-coordinator.js";
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json");
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -51,6 +52,7 @@ const ALLOW_EXECUTE = process.env.LEAP_ALLOW_EXECUTE !== "false";
 const LEAP_PROFILES_DIR = process.env.LEAP_PROFILES_DIR ?? path.join(os.homedir(), ".leapfrog", "chrome-profiles");
 const LEAP_TILE = process.env.LEAP_TILE;
 const LEAP_TILE_PADDING = Number(process.env.LEAP_TILE_PADDING ?? 8);
+const LEAP_MULTI_TILE = process.env.LEAP_MULTI_TILE === "true";
 const LEAP_HUD = process.env.LEAP_HUD === "true";
 const LEAP_AUTO_CONSENT = process.env.LEAP_AUTO_CONSENT !== "false"; // default ON
 const LEAP_TRACE = process.env.LEAP_TRACE === "true";
@@ -69,6 +71,56 @@ if (LEAP_TILE && LEAP_TILE !== "false") {
         layout: LEAP_TILE === "master" ? "master" : "grid",
         padding: Number.isFinite(LEAP_TILE_PADDING) ? LEAP_TILE_PADDING : 8,
     });
+}
+// Multi-terminal tile coordinator — active whenever tiling is on.
+// Uses file-based coordination so multiple Leapfrog instances share the screen.
+// Zero cost for single-terminal (just tracks one instance). No extra env var needed.
+let tilesCoord = null;
+if (LEAP_TILE && LEAP_TILE !== "false") {
+    // Screen size is detected lazily by tileManager; use defaults until then.
+    // The coordinator will be fully initialized once the first session detects screen size.
+    tilesCoord = new TilesCoordinator(1920, 1080);
+    tilesCoord.watch((state) => {
+        // When another instance changes the grid, reflow our own windows
+        // using global slot count + indices so all instances share one grid.
+        if (tileManager.isEnabled()) {
+            const sessionMap = new Map();
+            for (const si of sessions.listSessions()) {
+                const sess = sessions.getSession(si.id);
+                if (sess)
+                    sessionMap.set(si.id, sess);
+            }
+            const slotIndex = new Map();
+            state.slots.forEach((slot, idx) => slotIndex.set(slot.sessionId, idx));
+            logger.info("tile.watcher_reflow", { globalTotal: state.slots.length, local: sessionMap.size });
+            tileManager.reflowAll(sessionMap, {
+                globalTotal: state.slots.length,
+                slotIndex,
+            }).catch((e) => logger.warn("tile.watcher_reflow_failed", { error: e?.message }));
+        }
+    });
+}
+/** Build multi-tile context from coordinator, or undefined if not in multi-tile mode. */
+async function getMultiTileContext() {
+    if (!tilesCoord)
+        return undefined;
+    const state = await tilesCoord.getLayout();
+    const slotIndex = new Map();
+    state.slots.forEach((slot, idx) => slotIndex.set(slot.sessionId, idx));
+    return { globalTotal: state.slots.length, slotIndex };
+}
+/** Reflow all local windows, using global grid state when multi-tile is active. */
+async function reflowWithContext() {
+    if (!tileManager.isEnabled())
+        return;
+    const sessionMap = new Map();
+    for (const si of sessions.listSessions()) {
+        const sess = sessions.getSession(si.id);
+        if (sess)
+            sessionMap.set(si.id, sess);
+    }
+    const ctx = await getMultiTileContext();
+    await tileManager.reflowAll(sessionMap, ctx);
 }
 const snapEngine = new SnapshotEngine();
 // Hook API intelligence into network response listener
@@ -229,6 +281,12 @@ server.registerTool("session_create", {
         if (LEAP_TRACE) {
             await session.context.tracing.start({ screenshots: true, snapshots: true });
         }
+        // Multi-terminal tiling: claim a slot for this session
+        if (tilesCoord) {
+            await tilesCoord.claimSlot(session.id).catch(() => { });
+        }
+        // Reflow + raise all tiled windows after creating a new session
+        await reflowWithContext().catch(() => { });
         const stats = sessions.getStats();
         return ok(`Session created: ${session.id}${pinned ? " (pinned)" : ""}\n` +
             `Pool: ${stats.active}/${stats.maxSessions} active`);
@@ -279,11 +337,17 @@ server.registerTool("session_destroy", {
         }
         catch { /* tracing stop is non-fatal */ }
     }
+    // Multi-terminal tiling: release the slot
+    if (tilesCoord) {
+        await tilesCoord.releaseSlot(sessionId).catch(() => { });
+    }
     // Clean up module-level state for the session
     SnapshotDiffer.clearSession(sessionId);
     ApiIntelligence.clearSession(sessionId);
     HarnessIntelligence.clearSession(sessionId);
     await sessions.destroySession(sessionId);
+    // Reflow remaining windows to fill the gap
+    await reflowWithContext().catch(() => { });
     const stats = sessions.getStats();
     return ok(`Destroyed ${sessionId}. Pool: ${stats.active}/${stats.maxSessions}`);
 });
@@ -458,12 +522,18 @@ server.registerTool("navigate", {
         session.navGeneration = (session.navGeneration ?? 0) + 1;
         // Reset API captures for the new page
         ApiIntelligence.clearSession(sessionId);
-        // Pre-load domain knowledge for adaptive behavior
-        const urlDomain = parsed.hostname;
-        const domainRecord = await domainKnowledge.load(urlDomain).catch(() => undefined);
+        // Pre-load domain knowledge for adaptive behavior (self-improvement loop)
+        const urlDomain = normalizeDomain(parsed.hostname);
+        const hints = await domainKnowledge.getNavigationHints(urlDomain).catch(() => ({}));
+        // Apply learned wait strategy if the user didn't explicitly override
+        // The schema default is "load", so we check if hints suggest something better
+        let effectiveWaitUntil = waitUntil;
+        if (hints.waitUntil && waitUntil === "load") {
+            effectiveWaitUntil = hints.waitUntil;
+        }
         // Adaptive navigate with wait strategy selection + stealth escalation
         const result = await adaptiveNavigate(page, session, url, sessions, {
-            waitUntil,
+            waitUntil: effectiveWaitUntil,
             autoRetry,
             maxRetryLevel,
         });
@@ -491,9 +561,27 @@ server.registerTool("navigate", {
             }
             catch { /* URL parse error is non-fatal */ }
         }
-        // Record navigation in domain knowledge
+        // Record navigation in domain knowledge (closes the self-improvement loop)
         const navDuration = Date.now() - startTime;
-        domainKnowledge.recordNavigation(urlDomain, waitUntil, navDuration);
+        domainKnowledge.recordNavigation(urlDomain, effectiveWaitUntil, navDuration);
+        // Auto-dismiss known consent selector from domain knowledge
+        if (hints.consentSelector) {
+            try {
+                await result.page.click(hints.consentSelector, { timeout: 2000 });
+                logger.debug("domain-knowledge:consent-auto-dismissed", { domain: urlDomain, selector: hints.consentSelector });
+            }
+            catch { /* consent selector not found or not visible — that's fine */ }
+        }
+        // Raise tiled windows after navigation
+        if (tileManager.isEnabled()) {
+            const sessionMap = new Map();
+            for (const si of sessions.listSessions()) {
+                const sess = sessions.getSession(si.id);
+                if (sess)
+                    sessionMap.set(si.id, sess);
+            }
+            await tileManager.raiseAllWindows(sessionMap).catch(() => { });
+        }
         // Update HUD to active
         if (LEAP_HUD) {
             await result.page.evaluate(getHUDUpdateScript("active")).catch(() => { });
@@ -771,6 +859,17 @@ server.registerTool("act", {
                 if (!target)
                     return err(`'${action}' requires a target`);
                 const loc = resolve(target);
+                // Scroll target into view before click/dblclick ("follow the agent's eyes")
+                if ((action === "click" || action === "dblclick") && target) {
+                    try {
+                        // Resolve the CSS selector for scroll targeting
+                        const scrollSelector = target.startsWith("@e")
+                            ? session.refMap.get(target) ?? target
+                            : target;
+                        await page.evaluate(getScrollToTargetScript(scrollSelector));
+                    }
+                    catch { /* scroll-to-target is non-fatal */ }
+                }
                 // HUD: animate agent cursor + click ripple
                 if (LEAP_HUD && (action === "click" || action === "dblclick")) {
                     try {
@@ -2246,26 +2345,12 @@ async function main() {
                 await page.bringToFront();
             },
             restoreGrid: async () => {
-                if (tileManager.isEnabled()) {
-                    const sessionMap = new Map();
-                    for (const si of sessions.listSessions()) {
-                        const sess = sessions.getSession(si.id);
-                        if (sess)
-                            sessionMap.set(si.id, sess);
-                    }
-                    await tileManager.reflowAll(sessionMap);
-                }
+                await reflowWithContext();
             },
             setLayout: async (layout) => {
                 if (tileManager.isEnabled()) {
                     tileManager.configure({ layout: layout === "master" ? "master" : "grid", padding: LEAP_TILE_PADDING });
-                    const sessionMap = new Map();
-                    for (const si of sessions.listSessions()) {
-                        const sess = sessions.getSession(si.id);
-                        if (sess)
-                            sessionMap.set(si.id, sess);
-                    }
-                    await tileManager.reflowAll(sessionMap);
+                    await reflowWithContext();
                 }
             },
             destroyAll: async () => { await sessions.destroyAll(); },
@@ -2275,7 +2360,17 @@ async function main() {
                 return await page.screenshot();
             },
         });
-        await sidecar.start(LEAP_SIDECAR_PORT);
+        try {
+            await sidecar.start(LEAP_SIDECAR_PORT);
+        }
+        catch (e) {
+            if (e?.code === "EADDRINUSE") {
+                logger.warn("sidecar.port_in_use", { port: LEAP_SIDECAR_PORT, message: "Another Leapfrog instance owns this port. Sidecar disabled for this process." });
+            }
+            else {
+                throw e;
+            }
+        }
     }
     console.error(`Leapfrog MCP server running (max ${MAX_SESSIONS} sessions, headless=${HEADLESS}${tileManager.isEnabled() ? `, tile=${tileManager.getLayout()}` : ""}${LEAP_HUD ? ", HUD" : ""}${LEAP_TRACE ? ", tracing" : ""})`);
 }
@@ -2285,11 +2380,15 @@ main().catch((e) => {
 });
 // ─── Graceful shutdown ──────────────────────────────────────────────────────
 process.on("SIGINT", async () => {
+    if (tilesCoord)
+        await tilesCoord.releaseAll().catch(() => { });
     await domainKnowledge.flush().catch(() => { });
     await sessions.destroyAll();
     process.exit(0);
 });
 process.on("SIGTERM", async () => {
+    if (tilesCoord)
+        await tilesCoord.releaseAll().catch(() => { });
     await domainKnowledge.flush().catch(() => { });
     await sessions.destroyAll();
     process.exit(0);

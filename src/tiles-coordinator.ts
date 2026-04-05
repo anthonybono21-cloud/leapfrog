@@ -351,12 +351,24 @@ export class TilesCoordinator {
     }
 
     let debounce: ReturnType<typeof setTimeout> | null = null;
+    let lastMtime = 0;
+    try { lastMtime = fs.statSync(TILES_PATH).mtimeMs; } catch { /* ok */ }
 
-    this.watcher = fs.watch(TILES_PATH, () => {
-      // Debounce rapid successive writes (atomic rename triggers multiple events)
+    // Watch the DIRECTORY, not the file. fs.watch on a file breaks when
+    // atomic writes (rename .tmp → tiles.json) replace the inode.
+    // Directory watchers see rename events reliably on all platforms.
+    this.watcher = fs.watch(LEAPFROG_DIR, (_event, filename) => {
+      if (filename !== "tiles.json") return;
+
+      // Debounce rapid successive writes
       if (debounce) clearTimeout(debounce);
       debounce = setTimeout(() => {
         try {
+          // Skip if mtime hasn't actually changed (self-write echo)
+          const mtime = fs.statSync(TILES_PATH).mtimeMs;
+          if (mtime === lastMtime) return;
+          lastMtime = mtime;
+
           const state = readState(this.screenWidth, this.screenHeight);
           onChange(state);
         } catch {

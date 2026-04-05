@@ -27,6 +27,12 @@ export interface TileBounds {
   height: number;
 }
 
+/** Global context from multi-terminal coordinator for cross-instance tiling. */
+export interface MultiTileContext {
+  globalTotal: number;
+  slotIndex: Map<string, number>; // sessionId → global grid index
+}
+
 export type TileLayout = "grid" | "master";
 
 /**
@@ -262,10 +268,10 @@ print(f'{x} {y} {w} {h}')
   // Returns Chrome flags for window position/size at launch time.
   // Uses work area offset so windows appear in the usable area.
 
-  getLaunchTileArgs(sessionCount: number): string[] {
+  getLaunchTileArgs(sessionCount: number, multiTile?: { globalTotal: number; globalIndex: number }): string[] {
     const screen = this.screenSize ?? { x: 0, y: 25, width: 1920, height: 1055 };
-    const total = sessionCount + 1; // +1 for the session being created
-    const index = sessionCount;     // 0-based, this is the newest
+    const total = multiTile?.globalTotal ?? (sessionCount + 1);
+    const index = multiTile?.globalIndex ?? sessionCount;
 
     const bounds = TileManager.getTileBounds(index, total, screen, this.padding, this.layout);
 
@@ -322,18 +328,22 @@ print(f'{x} {y} {w} {h}')
   // Recalculates grid for all sessions and repositions every window.
   // Uses Promise.allSettled so one failure doesn't block others.
 
-  async reflowAll(sessions: Map<string, Session>): Promise<void> {
+  async reflowAll(sessions: Map<string, Session>, multiTile?: MultiTileContext): Promise<void> {
     if (!this.screenSize) return;
 
     const entries = Array.from(sessions.entries());
-    const total = entries.length;
-    if (total === 0) return;
+    if (entries.length === 0) return;
 
-    logger.info("tile.reflow", { total, layout: this.layout });
+    // When multi-tile is active, use global count/indices so all instances
+    // share one unified grid. Otherwise fall back to local session count.
+    const total = multiTile?.globalTotal ?? entries.length;
+
+    logger.info("tile.reflow", { total, local: entries.length, layout: this.layout });
 
     // Position all windows (parallel for speed)
     const results = await Promise.allSettled(
-      entries.map(async ([id, session], index) => {
+      entries.map(async ([id, session], localIndex) => {
+        const index = multiTile?.slotIndex.get(id) ?? localIndex;
         const bounds = TileManager.getTileBounds(index, total, this.screenSize!, this.padding, this.layout);
 
         // Get active page — prefer pages array if available, fall back to session.page
