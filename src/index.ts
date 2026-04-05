@@ -603,6 +603,9 @@ server.registerTool(
         effectiveWaitUntil = hints.waitUntil as typeof waitUntil;
       }
 
+      // Reset zoom in case a previous zoom-to-target was interrupted by navigation
+      await page.evaluate(() => { document.body.style.zoom = '1'; }).catch(() => {});
+
       // Adaptive navigate with wait strategy selection + stealth escalation
       const result = await adaptiveNavigate(page, session, url, sessions, {
         waitUntil: effectiveWaitUntil,
@@ -991,7 +994,7 @@ server.registerTool(
                   }
                 }, { x: box.x, y: box.y, w: box.width, h: box.height });
                 await page.waitForTimeout(1200);
-                // Zoom out and clean up
+                // Zoom out and clean up — wrapped separately so navigation doesn't leave zoom stuck
                 await page.evaluate(() => {
                   document.body.style.zoom = '1';
                   document.querySelectorAll('[style*="outline: 3px solid"]').forEach(e => {
@@ -999,9 +1002,9 @@ server.registerTool(
                     (e as HTMLElement).style.outlineOffset = '';
                     (e as HTMLElement).style.backgroundColor = '';
                   });
-                });
+                }).catch(() => {}); // page may have navigated — that's fine, new page starts at zoom=1
                 // Re-scroll at normal zoom so the click lands correctly
-                await loc.scrollIntoViewIfNeeded();
+                await loc.scrollIntoViewIfNeeded().catch(() => {});
                 await page.waitForTimeout(150);
               }
             } catch { /* zoom-to-target is non-fatal */ }
