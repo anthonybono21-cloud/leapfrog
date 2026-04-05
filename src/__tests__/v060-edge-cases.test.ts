@@ -619,19 +619,17 @@ describe("intervention — edge cases", () => {
 describe("session-hud — edge cases", () => {
   // ── 19. XSS in session name ────────────────────────────────────────────
 
-  it("getHUDInitScript escapes XSS payloads in session name", () => {
+  it("getHUDInitScript does not embed session name (no XSS vector)", () => {
     const xssName = '<img onerror=alert(1)>';
     const script = getHUDInitScript(xssName);
 
-    // The session name is injected via innerHTML, so we need to verify
-    // it doesn't contain raw unescaped HTML that could execute.
-    // The implementation uses: '${sessionName.replace(/'/g, "\\'")}'
-    // Since it's inside innerHTML, check it doesn't break the JS string.
-    expect(script).not.toContain("onerror=alert(1)>'");
+    // Session name is no longer embedded in the init script (status bar removed).
+    // Verify the XSS payload is not present in the output.
+    expect(script).not.toContain("onerror=alert(1)");
+    expect(script).not.toContain("<img");
 
-    // Verify the script is still valid (doesn't have unmatched quotes)
-    // A simple heuristic: the script should contain the session name reference
-    expect(script).toContain("hud-session");
+    // Script should still be valid ripple setup
+    expect(script).toContain("leapfrog-ripple");
   });
 
   // ── 20. Empty session name ─────────────────────────────────────────────
@@ -639,7 +637,7 @@ describe("session-hud — edge cases", () => {
   it("getHUDInitScript with empty string does not throw or produce broken JS", () => {
     const script = getHUDInitScript("");
     expect(script).toBeTruthy();
-    expect(script).toContain("hud-session");
+    expect(script).toContain("leapfrog-ripple");
     // Verify the output is still well-formed — contains opening and closing IIFE
     expect(script).toContain("(function()");
     expect(script.trim().endsWith("})();")).toBe(true);
@@ -647,28 +645,22 @@ describe("session-hud — edge cases", () => {
 
   // ── 21. All HUD statuses produce distinct colors ───────────────────────
 
-  it("every HUDStatus produces a distinct color in the update script", () => {
+  it("every HUDStatus returns empty string from update script (status bar removed)", () => {
     const statuses: HUDStatus[] = ["active", "loading", "waiting", "error", "complete"];
     const scripts = statuses.map((s) => getHUDUpdateScript(s));
 
-    // All should be distinct strings (different status names embedded)
-    const unique = new Set(scripts);
-    expect(unique.size).toBe(statuses.length);
-
-    // Each should reference its own status
-    for (let i = 0; i < statuses.length; i++) {
-      expect(scripts[i]).toContain(statuses[i]);
+    // All should be empty strings (status bar was removed)
+    for (const script of scripts) {
+      expect(script).toBe("");
     }
   });
 
-  it("HUD init script embeds all 5 status colors", () => {
+  it("HUD init script contains ripple CSS but not status colors (status bar removed)", () => {
     const script = getHUDInitScript("color-test");
-    // These are the color codes from STATUS_COLORS
-    expect(script).toContain("#22c55e"); // active
-    expect(script).toContain("#3b82f6"); // loading
-    expect(script).toContain("#f59e0b"); // waiting
-    expect(script).toContain("#ef4444"); // error
-    expect(script).toContain("#8b5cf6"); // complete
+    // Status colors are no longer embedded (status bar removed)
+    // But the ripple green color IS present in the CSS
+    expect(script).toContain("leapfrog-ripple");
+    expect(script).toContain("rgba(34, 197, 94");
   });
 
   // ── 22. Negative coordinates ───────────────────────────────────────────

@@ -92,7 +92,7 @@ export const CONSENT_SELECTORS: ConsentFramework[] = [
 
 // ─── Text-Match Pattern ───────────────────────────────────────────────────
 
-const TEXT_MATCH_REGEX = "/accept\\s*(all|cookies)?|i\\s*agree|got\\s*it|^ok$/i";
+const TEXT_MATCH_REGEX = "/^\\s*(accept\\s*(all|cookies)?|i\\s*agree|agree|got\\s*it|ok)\\s*$/i";
 
 // ─── Script Builders ──────────────────────────────────────────────────────
 
@@ -178,7 +178,15 @@ export function getConsentDismissScript(): string {
     }
 
     // 3. Fall back to text matching on visible buttons/links
-    var candidates = document.querySelectorAll('button, a[role="button"], [role="button"]');
+    //    Check both global candidates and elements inside modal dialogs
+    //    (CNN and similar sites use styled-component modals with <a> links)
+    var candidateSelectors = [
+      'button', 'a[role="button"]', '[role="button"]', 'a',
+      '[role="dialog"] button', '[role="dialog"] a',
+      '.modal button', '.modal a',
+      '[class*="modal"] button', '[class*="modal"] a'
+    ];
+    var candidates = document.querySelectorAll(candidateSelectors.join(', '));
     for (var k = 0; k < candidates.length; k++) {
       var c = candidates[k];
       if (c.getAttribute && c.getAttribute('data-leapfrog') === 'true') continue;
@@ -276,8 +284,14 @@ export function getConsentDetectScript(): string {
     }
   }
 
-  // Text fallback check
-  var candidates = document.querySelectorAll('button, a[role="button"], [role="button"]');
+  // Text fallback check — includes <a> tags and modal-scoped elements
+  var candidateSelectors = [
+    'button', 'a[role="button"]', '[role="button"]', 'a',
+    '[role="dialog"] button', '[role="dialog"] a',
+    '.modal button', '.modal a',
+    '[class*="modal"] button', '[class*="modal"] a'
+  ];
+  var candidates = document.querySelectorAll(candidateSelectors.join(', '));
   for (var k = 0; k < candidates.length; k++) {
     var text = (candidates[k].textContent || '').trim();
     if (TEXT_RE.test(text) && isVisible(candidates[k])) {

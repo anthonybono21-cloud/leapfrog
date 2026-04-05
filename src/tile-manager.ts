@@ -6,11 +6,14 @@
 // Key design:
 //   - Viewport (screenshot resolution) stays at 1280x720 regardless of tile size
 //   - Screen detection via page.evaluate() on first headed session, cached
+//   - Accounts for macOS menu bar, Dock, and work area offset
 //   - Launch-time positioning via --window-position/--window-size Chrome args
 //   - Runtime repositioning via CDP Browser.setWindowBounds for reflow
+//   - z-order management via raiseAllWindows() for keeping tiles visible
 //   - All operations are non-fatal — failures log warnings, never throw
 //
 
+import { execSync } from "child_process";
 import type { Page } from "playwright-core";
 import type { Session } from "./types.js";
 import { logger } from "./logger.js";
@@ -26,13 +29,24 @@ export interface TileBounds {
 
 export type TileLayout = "grid" | "master";
 
+/**
+ * Usable screen area — the rectangle excluding menu bar, Dock, etc.
+ * `x` and `y` are the top-left origin of the work area in screen coordinates.
+ */
+export interface ScreenWorkArea {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 // ─── Tile Manager ──────────────────────────────────────────────────────────
 
 class TileManager {
   private enabled = false;
   private layout: TileLayout = "grid";
   private padding = 8;
-  private screenSize: { width: number; height: number } | null = null;
+  private screenSize: ScreenWorkArea | null = null;
   private windowIds = new Map<string, number>();
 
   // ── Configuration ──────────────────────────────────────────────────
@@ -58,24 +72,102 @@ class TileManager {
 
   // ── Screen Detection ───────────────────────────────────────────────
   //
-  // Lazily detects screen size from the first headed page.
-  // Cached after first call. Falls back to 1920x1080 on failure.
+  // Lazily detects screen work area from the first headed page.
+  // Uses page.evaluate() to get availLeft/availTop/availWidth/availHeight
+  // which excludes menu bar and Dock on macOS.
+  // Falls back to osascript (macOS) then hardcoded defaults.
 
-  async detectScreen(page: Page): Promise<{ width: number; height: number }> {
+  async detectScreen(page: Page): Promise<ScreenWorkArea> {
     if (this.screenSize) return this.screenSize;
 
     try {
-      this.screenSize = await page.evaluate(() => ({
-        width: window.screen.availWidth,
-        height: window.screen.availHeight,
-      }));
-      logger.info("tile.screen_detected", this.screenSize);
-    } catch {
-      this.screenSize = { width: 1920, height: 1080 };
-      logger.warn("tile.screen_detection_failed", { fallback: this.screenSize });
+      // Best approach: maximize the window, then read its outer bounds.
+      // A maximized window IS the usable screen area — accounts for menu bar,
+      // dock, Retina scaling, notch, everything. No platform-specific hacks.
+      const cdpSession = await page.context().newCDPSession(page);
+      const { windowId } = await cdpSession.send("Browser.getWindowForTarget");
+
+      // Maximize the window
+      await cdpSession.send("Browser.setWindowBounds", {
+        windowId,
+        bounds: { windowState: "maximized" },
+      });
+      await page.waitForTimeout(200); // let the OS settle
+
+      // Read the maximized bounds — this is our screen work area
+      const { bounds } = await cdpSession.send("Browser.getWindowBounds", { windowId });
+      if (bounds.width && bounds.height && bounds.width > 100 && bounds.height > 100) {
+        this.screenSize = {
+          x: bounds.left ?? 0,
+          y: bounds.top ?? 0,
+          width: bounds.width,
+          height: bounds.height,
+        };
+        logger.info("tile.screen_detected_maximize", { ...this.screenSize });
+
+        // Restore to normal state so it can be tiled
+        await cdpSession.send("Browser.setWindowBounds", {
+          windowId,
+          bounds: { windowState: "normal" },
+        });
+      } else {
+        throw new Error("Invalid maximized bounds");
+      }
+      await cdpSession.detach();
+    } catch (err) {
+      // Fallback: try screen.availWidth/availHeight
+      try {
+        this.screenSize = await page.evaluate(() => ({
+          x: (window.screen as any).availLeft ?? 0,
+          y: (window.screen as any).availTop ?? 0,
+          width: window.screen.availWidth,
+          height: window.screen.availHeight,
+        }));
+        logger.info("tile.screen_detected_avail", { ...this.screenSize });
+      } catch {
+        // Last resort: osascript or hardcoded
+        this.screenSize = TileManager.detectScreenViaOsascript();
+        if (this.screenSize) {
+          logger.info("tile.screen_detected_osascript", { ...this.screenSize });
+        } else {
+          this.screenSize = { x: 0, y: 25, width: 1920, height: 1055 };
+          logger.warn("tile.screen_detection_failed", { fallback: this.screenSize });
+        }
+      }
     }
 
     return this.screenSize;
+  }
+
+  /**
+   * macOS fallback: query visible frame via Python + AppKit.
+   * Returns null on non-macOS or if the command fails.
+   */
+  static detectScreenViaOsascript(): ScreenWorkArea | null {
+    try {
+      // NSScreen.mainScreen().visibleFrame() returns the area excluding menu bar and Dock.
+      // visibleFrame origin is bottom-left (Cocoa coords), so we convert to top-left.
+      const script = `python3 -c "
+import AppKit
+s = AppKit.NSScreen.mainScreen()
+vf = s.visibleFrame()
+ff = s.frame()
+# Convert from Cocoa bottom-left origin to screen top-left origin
+x = int(vf.origin.x)
+y = int(ff.size.height - vf.origin.y - vf.size.height)
+w = int(vf.size.width)
+h = int(vf.size.height)
+print(f'{x} {y} {w} {h}')
+"`;
+      const result = execSync(script, { timeout: 3000, encoding: "utf-8" }).trim();
+      const parts = result.split(/\s+/).map(Number);
+      if (parts.length === 4 && parts.every((n) => !isNaN(n) && n >= 0)) {
+        return { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
+      }
+    } catch {
+      // Not macOS or python3/AppKit unavailable — that's fine
+    }
+    return null;
   }
 
   // ── Grid Calculation ───────────────────────────────────────────────
@@ -94,14 +186,19 @@ class TileManager {
   // ── Tile Bounds ────────────────────────────────────────────────────
   //
   // Pure function: calculate pixel bounds for a tile at given index.
+  // `screen` can be a simple {width, height} (offset defaults to 0,0)
+  // or a full ScreenWorkArea with x,y origin offset.
 
   static getTileBounds(
     index: number,
     total: number,
-    screen: { width: number; height: number },
+    screen: { width: number; height: number; x?: number; y?: number },
     padding: number,
     layout: TileLayout = "grid",
   ): TileBounds {
+    const offsetX = screen.x ?? 0;
+    const offsetY = screen.y ?? 0;
+
     if (layout === "master" && total > 1) {
       return TileManager.getMasterStackBounds(index, total, screen, padding);
     }
@@ -114,8 +211,8 @@ class TileManager {
     const tileH = Math.floor((screen.height - padding * (rows + 1)) / rows);
 
     return {
-      x: padding + col * (tileW + padding),
-      y: padding + row * (tileH + padding),
+      x: offsetX + padding + col * (tileW + padding),
+      y: offsetY + padding + row * (tileH + padding),
       width: Math.max(tileW, 500), // Chrome minimum ~500px
       height: Math.max(tileH, 300), // Chrome minimum ~200px, but 300 is more usable
     };
@@ -128,9 +225,11 @@ class TileManager {
   private static getMasterStackBounds(
     index: number,
     total: number,
-    screen: { width: number; height: number },
+    screen: { width: number; height: number; x?: number; y?: number },
     padding: number,
   ): TileBounds {
+    const offsetX = screen.x ?? 0;
+    const offsetY = screen.y ?? 0;
     const masterRatio = 0.6;
     const masterW = Math.floor(screen.width * masterRatio) - padding * 2;
     const stackW = Math.floor(screen.width * (1 - masterRatio)) - padding;
@@ -139,8 +238,8 @@ class TileManager {
     if (index === 0) {
       // Primary: left side, full height
       return {
-        x: padding,
-        y: padding,
+        x: offsetX + padding,
+        y: offsetY + padding,
         width: Math.max(masterW, 500),
         height: Math.max(screen.height - padding * 2, 300),
       };
@@ -151,8 +250,8 @@ class TileManager {
     const stackH = Math.floor((screen.height - padding * (stackCount + 1)) / stackCount);
 
     return {
-      x: Math.floor(screen.width * masterRatio) + padding,
-      y: padding + stackIndex * (stackH + padding),
+      x: offsetX + Math.floor(screen.width * masterRatio) + padding,
+      y: offsetY + padding + stackIndex * (stackH + padding),
       width: Math.max(stackW, 500),
       height: Math.max(stackH, 300),
     };
@@ -161,10 +260,10 @@ class TileManager {
   // ── Launch Args ────────────────────────────────────────────────────
   //
   // Returns Chrome flags for window position/size at launch time.
-  // Used for browser launch paths that build launchArgs[].
+  // Uses work area offset so windows appear in the usable area.
 
   getLaunchTileArgs(sessionCount: number): string[] {
-    const screen = this.screenSize ?? { width: 1920, height: 1080 };
+    const screen = this.screenSize ?? { x: 0, y: 25, width: 1920, height: 1055 };
     const total = sessionCount + 1; // +1 for the session being created
     const index = sessionCount;     // 0-based, this is the newest
 
@@ -245,17 +344,32 @@ class TileManager {
       }),
     );
 
-    // Bring all windows to front (sequential to ensure z-order matches grid order)
+    // Bring all windows to front after positioning
+    await this.raiseAllWindows(sessions);
+
+    const failed = results.filter((r) => r.status === "rejected").length;
+    if (failed > 0) {
+      logger.warn("tile.reflow_partial_failure", { total, failed });
+    }
+  }
+
+  // ── Z-Order Management ─────────────────────────────────────────────
+  //
+  // Brings all tiled browser windows to front in grid order.
+  // Sequential to ensure z-order matches grid order (first = bottom, last = top).
+  // Call after reflow, or externally when windows get buried behind terminal.
+
+  async raiseAllWindows(sessions: Map<string, Session>): Promise<void> {
+    const entries = Array.from(sessions.entries());
+    if (entries.length === 0) return;
+
+    logger.debug("tile.raise_all", { count: entries.length });
+
     for (const [, session] of entries) {
       const page = session.pages?.[session.activePageIndex ?? 0] ?? session.page;
       if (page && !page.isClosed()) {
         await page.bringToFront().catch(() => {});
       }
-    }
-
-    const failed = results.filter((r) => r.status === "rejected").length;
-    if (failed > 0) {
-      logger.warn("tile.reflow_partial_failure", { total, failed });
     }
   }
 

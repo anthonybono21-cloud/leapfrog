@@ -29,13 +29,15 @@ import { runStealthAudit } from "./stealth-audit.js";
 import { exportSession, replayRecording } from "./recording.js";
 import type { Recording } from "./recording.js";
 import { paginate } from "./paginate.js";
-import { getHUDInitScript, getHUDUpdateScript, getClickRippleScript, getMoveCursorScript } from "./session-hud.js";
+import { getHUDInitScript, getHUDUpdateScript, getClickRippleScript, getMoveCursorScript, getScrollToTargetScript } from "./session-hud.js";
 import type { HUDStatus } from "./session-hud.js";
 import { getDetectionInitScript, getDetectionCheckScript, getOverlayScript, getDismissScript, getResolutionCheckScript, parseDetectionResult } from "./intervention.js";
 import { SidecarServer } from "./sidecar.js";
 import { chime, alert as notifyAlert } from "./notify.js";
 import { getConsentDismissScript, getCacheSelectorScript } from "./consent-dismiss.js";
-import { domainKnowledge } from "./domain-knowledge.js";
+import { domainKnowledge, normalizeDomain } from "./domain-knowledge.js";
+import type { NavigationHints } from "./domain-knowledge.js";
+import { TilesCoordinator } from "./tiles-coordinator.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
@@ -56,6 +58,7 @@ const ALLOW_EXECUTE = process.env.LEAP_ALLOW_EXECUTE !== "false";
 const LEAP_PROFILES_DIR = process.env.LEAP_PROFILES_DIR ?? path.join(os.homedir(), ".leapfrog", "chrome-profiles");
 const LEAP_TILE = process.env.LEAP_TILE;
 const LEAP_TILE_PADDING = Number(process.env.LEAP_TILE_PADDING ?? 8);
+const LEAP_MULTI_TILE = process.env.LEAP_MULTI_TILE === "true";
 const LEAP_HUD = process.env.LEAP_HUD === "true";
 const LEAP_AUTO_CONSENT = process.env.LEAP_AUTO_CONSENT !== "false"; // default ON
 const LEAP_TRACE = process.env.LEAP_TRACE === "true";
@@ -75,6 +78,26 @@ if (LEAP_TILE && LEAP_TILE !== "false") {
   tileManager.configure({
     layout: LEAP_TILE === "master" ? "master" : "grid",
     padding: Number.isFinite(LEAP_TILE_PADDING) ? LEAP_TILE_PADDING : 8,
+  });
+}
+
+// Multi-terminal tile coordinator (opt-in via LEAP_MULTI_TILE=true)
+// Uses file-based coordination so multiple Leapfrog instances share the screen.
+let tilesCoord: TilesCoordinator | null = null;
+if (LEAP_MULTI_TILE && LEAP_TILE && LEAP_TILE !== "false") {
+  // Screen size is detected lazily by tileManager; use defaults until then.
+  // The coordinator will be fully initialized once the first session detects screen size.
+  tilesCoord = new TilesCoordinator(1920, 1080);
+  tilesCoord.watch((state) => {
+    // When another instance changes the grid, reflow our own windows
+    if (tileManager.isEnabled()) {
+      const sessionMap = new Map<string, Session>();
+      for (const si of sessions.listSessions()) {
+        const sess = sessions.getSession(si.id);
+        if (sess) sessionMap.set(si.id, sess);
+      }
+      tileManager.reflowAll(sessionMap).catch(() => {});
+    }
   });
 }
 
@@ -258,6 +281,21 @@ server.registerTool(
         await session.context.tracing.start({ screenshots: true, snapshots: true });
       }
 
+      // Multi-terminal tiling: claim a slot for this session
+      if (tilesCoord) {
+        await tilesCoord.claimSlot(session.id).catch(() => {});
+      }
+
+      // Raise all tiled windows after creating a new session
+      if (tileManager.isEnabled()) {
+        const sessionMap = new Map<string, Session>();
+        for (const si of sessions.listSessions()) {
+          const sess = sessions.getSession(si.id);
+          if (sess) sessionMap.set(si.id, sess);
+        }
+        await tileManager.raiseAllWindows(sessionMap).catch(() => {});
+      }
+
       const stats = sessions.getStats();
       return ok(
         `Session created: ${session.id}${pinned ? " (pinned)" : ""}\n` +
@@ -325,6 +363,11 @@ server.registerTool(
           logger.info("tracing.saved", { sessionId, path: tracePath });
         }
       } catch { /* tracing stop is non-fatal */ }
+    }
+
+    // Multi-terminal tiling: release the slot
+    if (tilesCoord) {
+      await tilesCoord.releaseSlot(sessionId).catch(() => {});
     }
 
     // Clean up module-level state for the session
@@ -523,13 +566,20 @@ server.registerTool(
       // Reset API captures for the new page
       ApiIntelligence.clearSession(sessionId);
 
-      // Pre-load domain knowledge for adaptive behavior
-      const urlDomain = parsed.hostname;
-      const domainRecord = await domainKnowledge.load(urlDomain).catch(() => undefined);
+      // Pre-load domain knowledge for adaptive behavior (self-improvement loop)
+      const urlDomain = normalizeDomain(parsed.hostname);
+      const hints: NavigationHints = await domainKnowledge.getNavigationHints(urlDomain).catch(() => ({}));
+
+      // Apply learned wait strategy if the user didn't explicitly override
+      // The schema default is "load", so we check if hints suggest something better
+      let effectiveWaitUntil = waitUntil;
+      if (hints.waitUntil && waitUntil === "load") {
+        effectiveWaitUntil = hints.waitUntil as typeof waitUntil;
+      }
 
       // Adaptive navigate with wait strategy selection + stealth escalation
       const result = await adaptiveNavigate(page, session, url, sessions, {
-        waitUntil,
+        waitUntil: effectiveWaitUntil,
         autoRetry,
         maxRetryLevel,
       });
@@ -559,9 +609,27 @@ server.registerTool(
         } catch { /* URL parse error is non-fatal */ }
       }
 
-      // Record navigation in domain knowledge
+      // Record navigation in domain knowledge (closes the self-improvement loop)
       const navDuration = Date.now() - startTime;
-      domainKnowledge.recordNavigation(urlDomain, waitUntil, navDuration);
+      domainKnowledge.recordNavigation(urlDomain, effectiveWaitUntil, navDuration);
+
+      // Auto-dismiss known consent selector from domain knowledge
+      if (hints.consentSelector) {
+        try {
+          await result.page.click(hints.consentSelector, { timeout: 2000 });
+          logger.debug("domain-knowledge:consent-auto-dismissed", { domain: urlDomain, selector: hints.consentSelector });
+        } catch { /* consent selector not found or not visible — that's fine */ }
+      }
+
+      // Raise tiled windows after navigation
+      if (tileManager.isEnabled()) {
+        const sessionMap = new Map<string, Session>();
+        for (const si of sessions.listSessions()) {
+          const sess = sessions.getSession(si.id);
+          if (sess) sessionMap.set(si.id, sess);
+        }
+        await tileManager.raiseAllWindows(sessionMap).catch(() => {});
+      }
 
       // Update HUD to active
       if (LEAP_HUD) {
@@ -878,6 +946,16 @@ server.registerTool(
         case "hover": {
           if (!target) return err(`'${action}' requires a target`);
           const loc = resolve(target);
+          // Scroll target into view before click/dblclick ("follow the agent's eyes")
+          if ((action === "click" || action === "dblclick") && target) {
+            try {
+              // Resolve the CSS selector for scroll targeting
+              const scrollSelector = target.startsWith("@e")
+                ? session.refMap.get(target) ?? target
+                : target;
+              await page.evaluate(getScrollToTargetScript(scrollSelector));
+            } catch { /* scroll-to-target is non-fatal */ }
+          }
           // HUD: animate agent cursor + click ripple
           if (LEAP_HUD && (action === "click" || action === "dblclick")) {
             try {
@@ -2554,12 +2632,14 @@ main().catch((e) => {
 // ─── Graceful shutdown ──────────────────────────────────────────────────────
 
 process.on("SIGINT", async () => {
+  if (tilesCoord) await tilesCoord.releaseAll().catch(() => {});
   await domainKnowledge.flush().catch(() => {});
   await sessions.destroyAll();
   process.exit(0);
 });
 
 process.on("SIGTERM", async () => {
+  if (tilesCoord) await tilesCoord.releaseAll().catch(() => {});
   await domainKnowledge.flush().catch(() => {});
   await sessions.destroyAll();
   process.exit(0);

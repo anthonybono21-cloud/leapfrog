@@ -56,11 +56,28 @@ export interface DomainRecord {
   lastVisit: number;
 }
 
+// ─── Types (public) ──────────────────────────────────────────────────────
+
+export interface NavigationHints {
+  waitUntil?: string;
+  stealthTier?: number;
+  consentSelector?: string | null;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────
+
+/**
+ * Normalize a domain string for consistent storage.
+ * Strips `www.` prefix and lowercases so that `www.wikipedia.org`
+ * and `Wikipedia.org` resolve to the same record.
+ */
+export function normalizeDomain(domain: string): string {
+  return domain.toLowerCase().replace(/^www\./, '');
+}
 
 /** Sanitize domain for use as a filename. Keep `.` and `-`, replace the rest. */
 function domainToFilename(domain: string): string {
-  return domain.replace(/[^a-zA-Z0-9.\-]/g, '_') + '.json';
+  return normalizeDomain(domain).replace(/[^a-zA-Z0-9.\-]/g, '_') + '.json';
 }
 
 // ─── Class ────────────────────────────────────────────────────────────────
@@ -81,49 +98,53 @@ export class DomainKnowledge {
 
   /** Load domain record from cache or disk. Creates empty if not found. */
   async load(domain: string): Promise<DomainRecord> {
-    const cached = this.cache.get(domain);
+    const key = normalizeDomain(domain);
+    const cached = this.cache.get(key);
     if (cached) return cached;
 
-    const filePath = join(this.baseDir, domainToFilename(domain));
+    const filePath = join(this.baseDir, domainToFilename(key));
     try {
       const raw = await readFile(filePath, 'utf-8');
       const record = JSON.parse(raw) as DomainRecord;
-      this.cache.set(domain, record);
+      record.domain = key; // ensure normalized
+      this.cache.set(key, record);
       this.evict();
       return record;
     } catch {
       // File missing or corrupt — start fresh
-      const record = this.createEmpty(domain);
-      this.cache.set(domain, record);
+      const record = this.createEmpty(key);
+      this.cache.set(key, record);
       return record;
     }
   }
 
   /** Get from cache only (sync, for hot paths). */
   get(domain: string): DomainRecord | undefined {
-    return this.cache.get(domain);
+    return this.cache.get(normalizeDomain(domain));
   }
 
   // ── Write ─────────────────────────────────────────────────────────────
 
   /** Merge partial updates into a domain record. Marks dirty. */
   update(domain: string, partial: Partial<DomainRecord>): void {
-    let record = this.cache.get(domain);
+    const key = normalizeDomain(domain);
+    let record = this.cache.get(key);
     if (!record) {
-      record = this.createEmpty(domain);
-      this.cache.set(domain, record);
+      record = this.createEmpty(key);
+      this.cache.set(key, record);
     }
-    Object.assign(record, partial, { domain }); // domain is immutable
-    this.dirty.add(domain);
+    Object.assign(record, partial, { domain: key }); // domain is immutable
+    this.dirty.add(key);
     this.evict();
   }
 
   /** Record a successful navigation — updates waitStrategy running average. */
   recordNavigation(domain: string, method: string, durationMs: number): void {
-    let record = this.cache.get(domain);
+    const key = normalizeDomain(domain);
+    let record = this.cache.get(key);
     if (!record) {
-      record = this.createEmpty(domain);
-      this.cache.set(domain, record);
+      record = this.createEmpty(key);
+      this.cache.set(key, record);
     }
 
     if (!record.waitStrategy) {
@@ -137,16 +158,17 @@ export class DomainKnowledge {
 
     record.visitCount++;
     record.lastVisit = Date.now();
-    this.dirty.add(domain);
+    this.dirty.add(key);
     this.evict();
   }
 
   /** Record a block event — escalates stealth tier if 2+ blocks in the last hour. */
   recordBlock(domain: string, reason: string): void {
-    let record = this.cache.get(domain);
+    const key = normalizeDomain(domain);
+    let record = this.cache.get(key);
     if (!record) {
-      record = this.createEmpty(domain);
-      this.cache.set(domain, record);
+      record = this.createEmpty(key);
+      this.cache.set(key, record);
     }
 
     record.blockHistory.push({ timestamp: Date.now(), reason });
@@ -156,25 +178,26 @@ export class DomainKnowledge {
     if (recentBlocks.length >= 2 && record.stealthTier < 3) {
       record.stealthTier++;
       logger.info('domain-knowledge:stealth-escalated', {
-        domain,
+        domain: key,
         newTier: record.stealthTier,
         recentBlocks: recentBlocks.length,
       });
     }
 
-    this.dirty.add(domain);
+    this.dirty.add(key);
   }
 
   /** Record a consent dismissal selector for future visits. */
   recordConsent(domain: string, selector: string): void {
-    let record = this.cache.get(domain);
+    const key = normalizeDomain(domain);
+    let record = this.cache.get(key);
     if (!record) {
-      record = this.createEmpty(domain);
-      this.cache.set(domain, record);
+      record = this.createEmpty(key);
+      this.cache.set(key, record);
     }
 
     record.consentSelector = selector;
-    this.dirty.add(domain);
+    this.dirty.add(key);
   }
 
   /** Record discovered API endpoints, merging with existing. */
@@ -182,10 +205,11 @@ export class DomainKnowledge {
     domain: string,
     endpoints: Array<{ path: string; method: string; classification: string }>,
   ): void {
-    let record = this.cache.get(domain);
+    const key = normalizeDomain(domain);
+    let record = this.cache.get(key);
     if (!record) {
-      record = this.createEmpty(domain);
-      this.cache.set(domain, record);
+      record = this.createEmpty(key);
+      this.cache.set(key, record);
     }
 
     const now = Date.now();
@@ -201,7 +225,7 @@ export class DomainKnowledge {
       }
     }
 
-    this.dirty.add(domain);
+    this.dirty.add(key);
   }
 
   // ── Persistence ───────────────────────────────────────────────────────
@@ -224,10 +248,11 @@ export class DomainKnowledge {
 
   /** Flush a single domain to disk. */
   async flushDomain(domain: string): Promise<void> {
-    if (!this.dirty.has(domain)) return;
+    const key = normalizeDomain(domain);
+    if (!this.dirty.has(key)) return;
     await this.ensureDir();
-    await this.writeDomain(domain);
-    this.dirty.delete(domain);
+    await this.writeDomain(key);
+    this.dirty.delete(key);
   }
 
   // ── Query ─────────────────────────────────────────────────────────────
@@ -249,16 +274,48 @@ export class DomainKnowledge {
 
   /** Get full record for display. Loads from disk if needed. */
   async inspect(domain: string): Promise<DomainRecord | null> {
-    const cached = this.cache.get(domain);
+    const key = normalizeDomain(domain);
+    const cached = this.cache.get(key);
     if (cached) return cached;
 
-    const filePath = join(this.baseDir, domainToFilename(domain));
+    const filePath = join(this.baseDir, domainToFilename(key));
     try {
       const raw = await readFile(filePath, 'utf-8');
       return JSON.parse(raw) as DomainRecord;
     } catch {
       return null;
     }
+  }
+
+  // ── Navigation Hints ──────────────────────────────────────────────────
+
+  /**
+   * Return actionable navigation hints from stored domain knowledge.
+   * This is the read-side of the self-improvement loop: past visits
+   * inform future navigation strategy, stealth tier, and consent handling.
+   *
+   * Returns an empty object if no useful knowledge exists yet.
+   */
+  async getNavigationHints(domain: string): Promise<NavigationHints> {
+    const record = await this.load(domain);
+    const hints: NavigationHints = {};
+
+    // Wait strategy: only trust it with 2+ samples
+    if (record.waitStrategy?.method && record.waitStrategy.samples >= 2) {
+      hints.waitUntil = record.waitStrategy.method;
+    }
+
+    // Stealth tier: propagate if non-zero
+    if (record.stealthTier > 0) {
+      hints.stealthTier = record.stealthTier;
+    }
+
+    // Consent selector: pass through if known
+    if (record.consentSelector) {
+      hints.consentSelector = record.consentSelector;
+    }
+
+    return hints;
   }
 
   // ── Internal ──────────────────────────────────────────────────────────

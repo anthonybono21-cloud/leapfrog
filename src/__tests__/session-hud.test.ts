@@ -5,6 +5,7 @@ import {
   getClickRippleScript,
   getMoveCursorScript,
   getToggleCursorScript,
+  getScrollToTargetScript,
 } from "../session-hud.js";
 import type { HUDStatus } from "../session-hud.js";
 
@@ -16,17 +17,17 @@ describe("session-hud", () => {
   // ── getHUDInitScript ───────────────────────────────────────────────
 
   describe("getHUDInitScript", () => {
-    it("returns a non-empty string containing the session name", () => {
+    it("returns a non-empty string containing ripple setup", () => {
       const script = getHUDInitScript("my-session");
       expect(script).toBeTruthy();
-      expect(script).toContain("my-session");
+      expect(script).toContain("leapfrog-ripple");
     });
 
-    it("output contains key CSS (border, z-index, leapfrog-hud)", () => {
+    it("output contains ripple CSS (z-index, leapfrog-ripple-container)", () => {
       const script = getHUDInitScript("test");
-      expect(script).toContain("border");
       expect(script).toContain("z-index");
-      expect(script).toContain("leapfrog-hud");
+      expect(script).toContain("leapfrog-ripple-container");
+      expect(script).toContain("leapfrog-ripple");
     });
 
     it("output references window.__leapfrog (valid JS control surface)", () => {
@@ -38,25 +39,24 @@ describe("session-hud", () => {
   // ── getHUDUpdateScript ─────────────────────────────────────────────
 
   describe("getHUDUpdateScript", () => {
-    it("returns string containing the green color for 'active'", () => {
+    it("returns empty string for 'active' (status bar removed)", () => {
       const script = getHUDUpdateScript("active");
-      expect(script).toContain("active");
-      expect(script).toBeTruthy();
+      expect(script).toBe("");
     });
 
-    it("returns string containing 'loading' for 'loading' status", () => {
+    it("returns empty string for 'loading' (status bar removed)", () => {
       const script = getHUDUpdateScript("loading");
-      expect(script).toContain("loading");
+      expect(script).toBe("");
     });
 
-    it("returns string containing 'error' for 'error' status", () => {
+    it("returns empty string for 'error' (status bar removed)", () => {
       const script = getHUDUpdateScript("error");
-      expect(script).toContain("error");
+      expect(script).toBe("");
     });
 
-    it("includes the label when provided", () => {
+    it("returns empty string regardless of label (status bar removed)", () => {
       const script = getHUDUpdateScript("active", "Navigating...");
-      expect(script).toContain("Navigating...");
+      expect(script).toBe("");
     });
   });
 
@@ -73,28 +73,54 @@ describe("session-hud", () => {
   // ── getMoveCursorScript ────────────────────────────────────────────
 
   describe("getMoveCursorScript", () => {
-    it("returns string containing the coordinates", () => {
+    it("returns empty string (agent cursor removed)", () => {
       const script = getMoveCursorScript(50, 75);
-      expect(script).toContain("50");
-      expect(script).toContain("75");
+      expect(script).toBe("");
     });
   });
 
   // ── getToggleCursorScript ──────────────────────────────────────────
 
   describe("getToggleCursorScript", () => {
-    it("returns different strings for true vs false", () => {
+    it("returns empty string for both true and false (cursor removed)", () => {
       const showScript = getToggleCursorScript(true);
       const hideScript = getToggleCursorScript(false);
-      expect(showScript).not.toBe(hideScript);
+      expect(showScript).toBe("");
+      expect(hideScript).toBe("");
     });
 
-    it("visible=true output contains 'true'", () => {
-      expect(getToggleCursorScript(true)).toContain("true");
+    it("visible=true returns empty string", () => {
+      expect(getToggleCursorScript(true)).toBe("");
     });
 
-    it("visible=false output contains 'false'", () => {
-      expect(getToggleCursorScript(false)).toContain("false");
+    it("visible=false returns empty string", () => {
+      expect(getToggleCursorScript(false)).toBe("");
+    });
+  });
+
+  // ── getScrollToTargetScript ────────────────────────────────────────
+
+  describe("getScrollToTargetScript", () => {
+    it("returns JS containing the selector", () => {
+      const script = getScrollToTargetScript("#my-element");
+      expect(script).toContain("#my-element");
+      expect(script).toContain("scrollIntoView");
+    });
+
+    it("escapes single quotes in selector", () => {
+      const script = getScrollToTargetScript("div[data-name='test']");
+      expect(script).toContain("\\'");
+    });
+
+    it("escapes backslashes in selector", () => {
+      const script = getScrollToTargetScript("div\\[class]");
+      expect(script).toContain("\\\\");
+    });
+
+    it("returns valid IIFE structure", () => {
+      const script = getScrollToTargetScript(".target");
+      expect(script).toContain("(function()");
+      expect(script.trim().endsWith("})();")).toBe(true);
     });
   });
 });

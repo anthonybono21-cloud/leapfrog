@@ -185,11 +185,11 @@ describe("TileManager", () => {
       const tm = new TileManager();
       (tm as any).enabled = true;
       (tm as any).padding = 0;
-      // screenSize is null — should use 1920x1080 fallback
+      // screenSize is null — should use fallback with menu bar offset (y=25, h=1055)
 
       const args = tm.getLaunchTileArgs(0);
-      expect(args[0]).toBe("--window-position=0,0");
-      expect(args[1]).toBe("--window-size=1920,1080");
+      expect(args[0]).toBe("--window-position=0,25");
+      expect(args[1]).toBe("--window-size=1920,1055");
     });
   });
 

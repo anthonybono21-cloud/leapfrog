@@ -1,7 +1,7 @@
 {
   "name": "leapfrog",
-  "version": "0.5.2",
-  "description": "Multi-session browser MCP for AI agents — 31 tools, stealth, persistent auth, code-first scripts, API sniffer, agent intelligence",
+  "version": "0.6.0",
+  "description": "Multi-session browser MCP for AI agents — 34 tools, stealth, persistent auth, code-first scripts, API sniffer, agent intelligence",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/types.d.ts",

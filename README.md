@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">Leapfrog</h1>
-<p align="center"><strong>Multi-session browser MCP for AI agents.</strong><br/>31 tools. 15 parallel sessions. Stealth. Humanization. Up to 10x fewer tokens.</p>
+<p align="center"><strong>Multi-session browser MCP for AI agents.</strong><br/>34 tools. 15 parallel sessions. Stealth. HUD. Self-improvement. Up to 10x fewer tokens.</p>
 
 <p align="center">
 <code>npm i leapfrog</code>&nbsp;&nbsp;|&nbsp;&nbsp;Works with Claude Code, Cursor, Windsurf
@@ -46,7 +46,11 @@ Add to `~/.mcp.json` (Claude Code) or your editor's MCP config:
     "command": "npx",
     "args": ["-y", "leapfrog"],
     "env": {
-      "LEAP_MAX_SESSIONS": "15"
+      "LEAP_MAX_SESSIONS": "15",
+      "LEAP_TILE": "true",
+      "LEAP_HUD": "true",
+      "LEAP_SOUND": "true",
+      "LEAP_AUTO_CONSENT": "true"
     }
   }
 }
@@ -178,6 +182,43 @@ Replaces 3-4 tool calls per page. Cap: 50 pages, 100K total chars. Stops on: no 
 
 The `diff` tool returns only what changed since the last snapshot — additions, removals, changes. Massive token savings for monitoring and polling workflows.
 
+## HUD Overlays (`LEAP_HUD=true`)
+
+When running headed, Leapfrog overlays visual feedback on every session:
+
+- **Color-coded border** — 3px edge: green=active, blue=loading, amber=waiting, red=error
+- **Status bar** — session name + status (bottom-left, semi-transparent)
+- **Agent cursor** — green dot that CSS-glides to click targets
+- **Click ripple** — expanding green circle at click coordinates (agent actions only)
+
+Makes it trivial to see what the agent is doing across tiled sessions.
+
+## Human Intervention
+
+Leapfrog auto-detects situations that need a human — CAPTCHAs, login forms, OAuth redirects, Cloudflare challenges — and pauses the agent until you handle it.
+
+- Detects reCAPTCHA, hCaptcha, Turnstile, login forms, OAuth redirects, Cloudflare challenges
+- Fullscreen `@..@` overlay with reason text + "Done" button
+- Sound chime + macOS notification on detection
+- `wait_for_human` tool — agent calls when stuck, blocks until you click Done
+
+## Cookie Consent Auto-Dismiss (`LEAP_AUTO_CONSENT=true`)
+
+Automatically dismisses cookie consent banners across 10 frameworks (OneTrust, CookieBot, TrustArc, Quantcast, Didomi, Cookielaw, Osano, Usercentrics, + generic) plus text-matching fallback. Per-domain selector caching for instant replay on revisit.
+
+## Tracing (`LEAP_TRACE=true`)
+
+Per-session Playwright tracing with screenshots + DOM snapshots. Export ZIP files viewable at `trace.playwright.dev` via the `session_export_trace` tool. Auto-saves on session destroy.
+
+## Self-Improvement
+
+Leapfrog learns from experience. Per-domain knowledge stored at `~/.leapfrog/domains/`:
+
+- **Wait strategy learning** — records which wait method worked per domain + running average timing
+- **Stealth tier learning** — auto-escalates after blocks, starts at the learned tier on revisit
+- **API endpoint caching** — remembers discovered endpoints for faster API intelligence
+- LRU eviction at 500 domains. Inspect with the `domain_knowledge` tool.
+
 ## SSRF Hardening
 
 URL validation blocks hex-encoded IPs (`0x7f000001`), octal notation (`0177.0.0.1`), CGNAT ranges (`100.64.0.0/10`), and redirect chains that resolve to internal addresses. Localhost and `127.0.0.0/8` are allowed by default for local dev workflows — set `LEAP_BLOCK_LOCALHOST=true` to block them.
@@ -196,7 +237,7 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | Console errors | **Croak** | Something went wrong in the browser |
 | Stealth mode | **Camouflage** | Anti-bot evasion patches |
 
-## All 31 Tools
+## All 34 Tools
 
 ### Pond Management (9)
 
@@ -237,6 +278,14 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | `tab_switch` | Hop to another pad (-1 for most recent popup) |
 | `tab_close` | Close a pad (can't close the last one) |
 
+### Agent Intelligence (3)
+
+| Tool | What it does |
+|---|---|
+| `wait_for_human` | Pause for human intervention — blocks until user clicks Done on the `@..@` overlay |
+| `domain_knowledge` | Inspect what Leapfrog has learned about a domain (wait strategies, stealth tiers, endpoints) |
+| `session_export_trace` | Export a Playwright trace ZIP — viewable at trace.playwright.dev |
+
 ### Network & API Intelligence (7)
 
 | Tool | What it does |
@@ -263,15 +312,21 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | `LEAP_ALLOW_EXECUTE` | `true` | Allow the `execute` tool (sandboxed Playwright scripts) |
 | `LEAP_BLOCK_LOCALHOST` | `false` | Block localhost/127.x.x.x (allowed by default for local dev) |
 | `LEAP_PROFILES_DIR` | `~/.leapfrog/chrome-profiles` | Directory for persistent browser profiles |
+| `LEAP_TILE` | `false` | Tile sessions in a grid and start sidecar HTTP server on `:9222` |
+| `LEAP_HUD` | `false` | Show color-coded borders, status bars, agent cursor, and click ripples |
+| `LEAP_SOUND` | `false` | Marimba chime on intervention detection (macOS) |
+| `LEAP_NOTIFY` | `false` | macOS notification center alerts on intervention detection |
+| `LEAP_AUTO_CONSENT` | `true` | Auto-dismiss cookie consent banners (10 frameworks + fallback) |
+| `LEAP_TRACE` | `false` | Per-session Playwright tracing (screenshots + DOM snapshots) |
 | `LEAP_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 
 ## Tests
 
 ```
- 554 passing across 21 suites
+ 774 passing across 27 suites
 ```
 
-Session management, snapshot engine, network intelligence, tab management, security, SSRF protection, stealth patches (19), humanization (mouse, typing, scroll), page classification, harness intelligence, API intelligence, script executor, extended actions, bug regression, stress tests, benchmarks.
+Session management, snapshot engine, network intelligence, tab management, security, SSRF protection, stealth patches (19), humanization (mouse, typing, scroll), page classification, harness intelligence, API intelligence, script executor, extended actions, HUD overlays, human intervention, cookie consent, domain knowledge, tracing, sidecar HTTP, bug regression, stress tests, benchmarks.
 
 ```bash
 npm test

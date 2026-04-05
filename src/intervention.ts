@@ -33,9 +33,13 @@ export function getDetectionInitScript(): string {
   window.__leapfrog_intervention_resolved = false;
 
   const CAPTCHA_IFRAME_PATTERNS = [
-    'recaptcha',
     'hcaptcha',
     'challenges.cloudflare.com'
+  ];
+
+  const RECAPTCHA_CHALLENGE_PATTERNS = [
+    'recaptcha/api2/anchor',
+    'recaptcha/api2/bframe'
   ];
 
   const TEXT_PATTERNS = [
@@ -65,12 +69,32 @@ export function getDetectionInitScript(): string {
     };
   }
 
+  function isIframeVisible(iframe) {
+    return iframe.offsetWidth > 0 && iframe.offsetHeight > 0;
+  }
+
+  function isInvisibleRecaptcha(src) {
+    try {
+      const url = new URL(src, window.location.href);
+      if (url.searchParams.get('size') === 'invisible') return true;
+    } catch (e) {}
+    return false;
+  }
+
   function checkCaptchaIframes() {
     const iframes = document.querySelectorAll('iframe[src]');
     for (const iframe of iframes) {
       const src = iframe.getAttribute('src') || '';
+      // Check non-recaptcha patterns (hcaptcha, cloudflare)
       for (const pattern of CAPTCHA_IFRAME_PATTERNS) {
-        if (src.includes(pattern)) {
+        if (src.includes(pattern) && isIframeVisible(iframe)) {
+          setIntervention('captcha', 'CAPTCHA detected', 'iframe[src*="' + pattern + '"]');
+          return true;
+        }
+      }
+      // Check recaptcha — only match actual challenge iframes, not scoring-only
+      for (const pattern of RECAPTCHA_CHALLENGE_PATTERNS) {
+        if (src.includes(pattern) && isIframeVisible(iframe) && !isInvisibleRecaptcha(src)) {
           setIntervention('captcha', 'CAPTCHA detected', 'iframe[src*="' + pattern + '"]');
           return true;
         }
@@ -144,6 +168,23 @@ export function getDetectionInitScript(): string {
     runAllChecks();
   }, 2000);
 
+  function checkIframeSrc(iframe) {
+    const src = iframe.getAttribute('src') || '';
+    for (const pattern of CAPTCHA_IFRAME_PATTERNS) {
+      if (src.includes(pattern) && isIframeVisible(iframe)) {
+        setIntervention('captcha', 'CAPTCHA detected', 'iframe[src*="' + pattern + '"]');
+        return true;
+      }
+    }
+    for (const pattern of RECAPTCHA_CHALLENGE_PATTERNS) {
+      if (src.includes(pattern) && isIframeVisible(iframe) && !isInvisibleRecaptcha(src)) {
+        setIntervention('captcha', 'CAPTCHA detected', 'iframe[src*="' + pattern + '"]');
+        return true;
+      }
+    }
+    return false;
+  }
+
   // MutationObserver for fast detection of new iframes / challenge elements
   const observer = new MutationObserver((mutations) => {
     if (window.__leapfrog_intervention) return;
@@ -152,13 +193,7 @@ export function getDetectionInitScript(): string {
         if (!(node instanceof HTMLElement)) continue;
         // Check if added node is a captcha iframe
         if (node.tagName === 'IFRAME') {
-          const src = node.getAttribute('src') || '';
-          for (const pattern of CAPTCHA_IFRAME_PATTERNS) {
-            if (src.includes(pattern)) {
-              setIntervention('captcha', 'CAPTCHA detected', 'iframe[src*="' + pattern + '"]');
-              return;
-            }
-          }
+          if (checkIframeSrc(node)) return;
         }
         // Check if added node matches challenge selectors
         for (const sel of CHALLENGE_SELECTORS) {
@@ -170,13 +205,7 @@ export function getDetectionInitScript(): string {
         // Check for captcha iframes inside added subtree
         const nestedIframes = node.querySelectorAll ? node.querySelectorAll('iframe[src]') : [];
         for (const iframe of nestedIframes) {
-          const src = iframe.getAttribute('src') || '';
-          for (const pattern of CAPTCHA_IFRAME_PATTERNS) {
-            if (src.includes(pattern)) {
-              setIntervention('captcha', 'CAPTCHA detected', 'iframe[src*="' + pattern + '"]');
-              return;
-            }
-          }
+          if (checkIframeSrc(iframe)) return;
         }
       }
     }
@@ -209,9 +238,13 @@ export function getDetectionCheckScript(): string {
   }
 
   const CAPTCHA_IFRAME_PATTERNS = [
-    'recaptcha',
     'hcaptcha',
     'challenges.cloudflare.com'
+  ];
+
+  const RECAPTCHA_CHALLENGE_PATTERNS = [
+    'recaptcha/api2/anchor',
+    'recaptcha/api2/bframe'
   ];
 
   const TEXT_PATTERNS = [
@@ -231,12 +264,27 @@ export function getDetectionCheckScript(): string {
     '/login/oauth'
   ];
 
+  function isInvisibleRecaptcha(src) {
+    try {
+      const u = new URL(src, window.location.href);
+      if (u.searchParams.get('size') === 'invisible') return true;
+    } catch (e) {}
+    return false;
+  }
+
   // Check captcha iframes
   const iframes = document.querySelectorAll('iframe[src]');
   for (const iframe of iframes) {
     const src = iframe.getAttribute('src') || '';
+    const visible = iframe.offsetWidth > 0 && iframe.offsetHeight > 0;
+    if (!visible) continue;
     for (const pattern of CAPTCHA_IFRAME_PATTERNS) {
       if (src.includes(pattern)) {
+        return { type: 'captcha', reason: 'CAPTCHA detected', elementSelector: 'iframe[src*="' + pattern + '"]', timestamp: Date.now() };
+      }
+    }
+    for (const pattern of RECAPTCHA_CHALLENGE_PATTERNS) {
+      if (src.includes(pattern) && !isInvisibleRecaptcha(src)) {
         return { type: 'captcha', reason: 'CAPTCHA detected', elementSelector: 'iframe[src*="' + pattern + '"]', timestamp: Date.now() };
       }
     }
@@ -301,6 +349,38 @@ export function getOverlayScript(reason: string): string {
   // Remove existing overlay if any
   const existing = document.getElementById('leapfrog-intervention-overlay');
   if (existing) existing.remove();
+  const existingBar = document.getElementById('leapfrog-intervention-topbar');
+  if (existingBar) existingBar.remove();
+
+  // BUG-005: Prepend warning to document title for tab visibility
+  if (!document.title.startsWith('\\u26a0\\ufe0f NEEDS HUMAN')) {
+    document.title = '\\u26a0\\ufe0f NEEDS HUMAN \\u2014 ' + document.title;
+  }
+
+  // BUG-006: Persistent red top bar visible at any tile size
+  const topBar = document.createElement('div');
+  topBar.id = 'leapfrog-intervention-topbar';
+  topBar.setAttribute('data-leapfrog', 'true');
+  topBar.textContent = '\\u26a0\\ufe0f NEEDS HUMAN';
+  topBar.style.cssText = [
+    'position: fixed',
+    'top: 0',
+    'left: 0',
+    'width: 100%',
+    'height: 32px',
+    'background: #ef4444',
+    'color: white',
+    'z-index: 2147483647',
+    'font-size: 14px',
+    'text-align: center',
+    'line-height: 32px',
+    'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    'font-weight: 600',
+    'letter-spacing: 0.02em',
+    'pointer-events: none'
+  ].join('; ');
+  document.body.appendChild(topBar);
+  document.body.style.marginTop = '32px';
 
   const overlay = document.createElement('div');
   overlay.id = 'leapfrog-intervention-overlay';
@@ -396,6 +476,12 @@ export function getOverlayScript(reason: string): string {
     window.__leapfrog_intervention_resolved = true;
     window.__leapfrog_intervention = null;
     overlay.remove();
+    // Clean up top bar
+    const bar = document.getElementById('leapfrog-intervention-topbar');
+    if (bar) bar.remove();
+    document.body.style.marginTop = '';
+    // Restore document title
+    document.title = document.title.replace(/^\\u26a0\\ufe0f NEEDS HUMAN \\u2014 /, '');
   });
 
   overlay.appendChild(eyes);
@@ -416,6 +502,10 @@ export function getDismissScript(): string {
   return `(() => {
   const overlay = document.getElementById('leapfrog-intervention-overlay');
   if (overlay) overlay.remove();
+  const bar = document.getElementById('leapfrog-intervention-topbar');
+  if (bar) bar.remove();
+  document.body.style.marginTop = '';
+  document.title = document.title.replace(/^\\u26a0\\ufe0f NEEDS HUMAN \\u2014 /, '');
 })()`;
 }
 
