@@ -985,19 +985,18 @@ server.registerTool(
                 // Zoom in via page coordinates
                 await page.evaluate(({ x, y, w, h }) => {
                   const el = document.elementFromPoint(x + w / 2, y + h / 2);
-                  document.body.style.zoom = '2.5';
+                  document.body.style.zoom = '1.15';
                   if (el) {
                     (el as HTMLElement).scrollIntoView({ block: 'center' });
-                    (el as HTMLElement).style.outline = '3px solid #22c55e';
-                    (el as HTMLElement).style.outlineOffset = '4px';
-                    (el as HTMLElement).style.backgroundColor = 'rgba(34, 197, 94, 0.1)';
+                    (el as HTMLElement).style.outline = '2px solid #22c55e';
+                    (el as HTMLElement).style.outlineOffset = '3px';
                   }
                 }, { x: box.x, y: box.y, w: box.width, h: box.height });
-                await page.waitForTimeout(1200);
+                await page.waitForTimeout(800);
                 // Zoom out and clean up — wrapped separately so navigation doesn't leave zoom stuck
                 await page.evaluate(() => {
                   document.body.style.zoom = '1';
-                  document.querySelectorAll('[style*="outline: 3px solid"]').forEach(e => {
+                  document.querySelectorAll('[style*="outline: 2px solid"]').forEach(e => {
                     (e as HTMLElement).style.outline = '';
                     (e as HTMLElement).style.outlineOffset = '';
                     (e as HTMLElement).style.backgroundColor = '';
