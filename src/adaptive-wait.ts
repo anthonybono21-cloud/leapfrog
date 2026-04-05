@@ -179,11 +179,16 @@ function isBlockedSnapshot(snapshotText: string): boolean {
     "verify you're human",
     "verify you are human",
     "access denied",
+    "has been denied",
     "security check",
     "bot detection",
+    "bot or not",
+    "show us your human side",
     "prove you're not a robot",
     "i'm not a robot",
     "unusual traffic",
+    "press & hold",
+    "press and hold",
   ];
 
   const WEAK_KEYWORDS = [

@@ -27,11 +27,11 @@ import { adaptiveNavigate, formatAdaptiveResult } from "./adaptive-wait.js";
 import { runStealthAudit } from "./stealth-audit.js";
 import { exportSession, replayRecording } from "./recording.js";
 import { paginate } from "./paginate.js";
-import { getHUDInitScript, getHUDUpdateScript, getClickRippleScript, getMoveCursorScript, getScrollToTargetScript } from "./session-hud.js";
+import { getHUDInitScript, getHUDUpdateScript, getClickRippleScript, getMoveCursorScript } from "./session-hud.js";
 import { getDetectionInitScript, getDetectionCheckScript, getOverlayScript, getDismissScript, getResolutionCheckScript, parseDetectionResult } from "./intervention.js";
 import { SidecarServer } from "./sidecar.js";
 import { chime, alert as notifyAlert } from "./notify.js";
-import { getConsentDismissScript } from "./consent-dismiss.js";
+import { getConsentDismissScript, getCacheSelectorScript } from "./consent-dismiss.js";
 import { domainKnowledge, normalizeDomain } from "./domain-knowledge.js";
 import { TilesCoordinator } from "./tiles-coordinator.js";
 const require = createRequire(import.meta.url);
@@ -531,11 +531,18 @@ server.registerTool("navigate", {
         if (hints.waitUntil && waitUntil === "load") {
             effectiveWaitUntil = hints.waitUntil;
         }
+        // Reset zoom in case a previous zoom-to-target was interrupted by navigation
+        await page.evaluate(() => { document.body.style.zoom = '1'; }).catch(() => { });
+        // Apply learned stealth tier — domains that blocked before start at higher escalation
+        let effectiveMaxRetryLevel = maxRetryLevel;
+        if (hints.stealthTier && hints.stealthTier > 0) {
+            effectiveMaxRetryLevel = Math.max(maxRetryLevel, hints.stealthTier + 1);
+        }
         // Adaptive navigate with wait strategy selection + stealth escalation
         const result = await adaptiveNavigate(page, session, url, sessions, {
             waitUntil: effectiveWaitUntil,
             autoRetry,
-            maxRetryLevel,
+            maxRetryLevel: effectiveMaxRetryLevel,
         });
         // P0-2: Post-navigation SSRF check — catch 302 redirects to internal IPs
         try {
@@ -564,13 +571,46 @@ server.registerTool("navigate", {
         // Record navigation in domain knowledge (closes the self-improvement loop)
         const navDuration = Date.now() - startTime;
         domainKnowledge.recordNavigation(urlDomain, effectiveWaitUntil, navDuration);
+        // Record block event — feeds stealth tier escalation on revisit
+        if (result.quality === "BLOCKED" || result.classification.type === "challenge") {
+            const reason = result.classification.type === "challenge"
+                ? `challenge:${result.classification.signals?.join(",") ?? "unknown"}`
+                : `blocked:${result.escalation?.label ?? "initial"}`;
+            domainKnowledge.recordBlock(urlDomain, reason);
+        }
         // Auto-dismiss known consent selector from domain knowledge
         if (hints.consentSelector) {
             try {
+                // Pre-seed browser cache so injected dismiss script skips detection
+                await result.page.evaluate(getCacheSelectorScript(urlDomain, hints.consentSelector)).catch(() => { });
                 await result.page.click(hints.consentSelector, { timeout: 2000 });
                 logger.debug("domain-knowledge:consent-auto-dismissed", { domain: urlDomain, selector: hints.consentSelector });
             }
             catch { /* consent selector not found or not visible — that's fine */ }
+        }
+        // Read back consent dismiss result from browser and persist for future visits
+        // The injected dismiss script waits 1.5s after DOMContentLoaded, so we wait 2.5s
+        // to give it time to find and click the banner before reading back.
+        // The browser-side script uses window.location.hostname (includes www.),
+        // so we check both normalized and raw hostname keys.
+        if (LEAP_AUTO_CONSENT && !hints.consentSelector) {
+            setTimeout(async () => {
+                try {
+                    const consentResult = await result.page.evaluate(() => {
+                        const cache = window.__leapfrog_consent_cache;
+                        if (!cache)
+                            return null;
+                        // Return the first cached selector found (keyed by hostname)
+                        const keys = Object.keys(cache);
+                        return keys.length > 0 ? cache[keys[0]] : null;
+                    });
+                    if (consentResult) {
+                        domainKnowledge.recordConsent(urlDomain, consentResult);
+                        logger.debug("domain-knowledge:consent-recorded", { domain: urlDomain, selector: consentResult });
+                    }
+                }
+                catch { /* consent recording is best-effort — page may have navigated away */ }
+            }, 2500);
         }
         // Raise tiled windows after navigation
         if (tileManager.isEnabled()) {
@@ -859,16 +899,39 @@ server.registerTool("act", {
                 if (!target)
                     return err(`'${action}' requires a target`);
                 const loc = resolve(target);
-                // Scroll target into view before click/dblclick ("follow the agent's eyes")
+                // Zoom-to-target: "follow the agent's eyes" — zoom in, highlight, hold, zoom out
+                // Uses Playwright locator (not querySelector) since refMap stores Playwright selectors
                 if ((action === "click" || action === "dblclick") && target) {
                     try {
-                        // Resolve the CSS selector for scroll targeting
-                        const scrollSelector = target.startsWith("@e")
-                            ? session.refMap.get(target) ?? target
-                            : target;
-                        await page.evaluate(getScrollToTargetScript(scrollSelector));
+                        await loc.scrollIntoViewIfNeeded();
+                        const box = await loc.boundingBox();
+                        if (box) {
+                            // Zoom in via page coordinates
+                            await page.evaluate(({ x, y, w, h }) => {
+                                const el = document.elementFromPoint(x + w / 2, y + h / 2);
+                                document.body.style.zoom = '1.15';
+                                if (el) {
+                                    el.scrollIntoView({ block: 'center' });
+                                    el.style.outline = '2px solid #22c55e';
+                                    el.style.outlineOffset = '3px';
+                                }
+                            }, { x: box.x, y: box.y, w: box.width, h: box.height });
+                            await page.waitForTimeout(800);
+                            // Zoom out and clean up — wrapped separately so navigation doesn't leave zoom stuck
+                            await page.evaluate(() => {
+                                document.body.style.zoom = '1';
+                                document.querySelectorAll('[style*="outline: 2px solid"]').forEach(e => {
+                                    e.style.outline = '';
+                                    e.style.outlineOffset = '';
+                                    e.style.backgroundColor = '';
+                                });
+                            }).catch(() => { }); // page may have navigated — that's fine, new page starts at zoom=1
+                            // Re-scroll at normal zoom so the click lands correctly
+                            await loc.scrollIntoViewIfNeeded().catch(() => { });
+                            await page.waitForTimeout(150);
+                        }
                     }
-                    catch { /* scroll-to-target is non-fatal */ }
+                    catch { /* zoom-to-target is non-fatal */ }
                 }
                 // HUD: animate agent cursor + click ripple
                 if (LEAP_HUD && (action === "click" || action === "dblclick")) {

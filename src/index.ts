@@ -606,11 +606,17 @@ server.registerTool(
       // Reset zoom in case a previous zoom-to-target was interrupted by navigation
       await page.evaluate(() => { document.body.style.zoom = '1'; }).catch(() => {});
 
+      // Apply learned stealth tier — domains that blocked before start at higher escalation
+      let effectiveMaxRetryLevel = maxRetryLevel;
+      if (hints.stealthTier && hints.stealthTier > 0) {
+        effectiveMaxRetryLevel = Math.max(maxRetryLevel, hints.stealthTier + 1);
+      }
+
       // Adaptive navigate with wait strategy selection + stealth escalation
       const result = await adaptiveNavigate(page, session, url, sessions, {
         waitUntil: effectiveWaitUntil,
         autoRetry,
-        maxRetryLevel,
+        maxRetryLevel: effectiveMaxRetryLevel,
       });
 
       // P0-2: Post-navigation SSRF check — catch 302 redirects to internal IPs
@@ -642,12 +648,45 @@ server.registerTool(
       const navDuration = Date.now() - startTime;
       domainKnowledge.recordNavigation(urlDomain, effectiveWaitUntil, navDuration);
 
+      // Record block event — feeds stealth tier escalation on revisit
+      if (result.quality === "BLOCKED" || result.classification.type === "challenge") {
+        const reason = result.classification.type === "challenge"
+          ? `challenge:${result.classification.signals?.join(",") ?? "unknown"}`
+          : `blocked:${result.escalation?.label ?? "initial"}`;
+        domainKnowledge.recordBlock(urlDomain, reason);
+      }
+
       // Auto-dismiss known consent selector from domain knowledge
       if (hints.consentSelector) {
         try {
+          // Pre-seed browser cache so injected dismiss script skips detection
+          await result.page.evaluate(getCacheSelectorScript(urlDomain, hints.consentSelector)).catch(() => {});
           await result.page.click(hints.consentSelector, { timeout: 2000 });
           logger.debug("domain-knowledge:consent-auto-dismissed", { domain: urlDomain, selector: hints.consentSelector });
         } catch { /* consent selector not found or not visible — that's fine */ }
+      }
+
+      // Read back consent dismiss result from browser and persist for future visits
+      // The injected dismiss script waits 1.5s after DOMContentLoaded, so we wait 2.5s
+      // to give it time to find and click the banner before reading back.
+      // The browser-side script uses window.location.hostname (includes www.),
+      // so we check both normalized and raw hostname keys.
+      if (LEAP_AUTO_CONSENT && !hints.consentSelector) {
+        setTimeout(async () => {
+          try {
+            const consentResult = await result.page.evaluate(() => {
+              const cache = (window as any).__leapfrog_consent_cache;
+              if (!cache) return null;
+              // Return the first cached selector found (keyed by hostname)
+              const keys = Object.keys(cache);
+              return keys.length > 0 ? cache[keys[0]] : null;
+            });
+            if (consentResult) {
+              domainKnowledge.recordConsent(urlDomain, consentResult);
+              logger.debug("domain-knowledge:consent-recorded", { domain: urlDomain, selector: consentResult });
+            }
+          } catch { /* consent recording is best-effort — page may have navigated away */ }
+        }, 2500);
       }
 
       // Raise tiled windows after navigation
