@@ -169,22 +169,31 @@ async function snapAndFormat(session: Session, opts?: { selector?: string; maxCh
   const page = getPage(session);
 
   // Load stable element suppress set from domain knowledge
+  // Use current page domain for suppression (matches BUG-5 fix for recording)
+  let currentDomain: string | undefined;
+  try { currentDomain = new URL(page.url()).hostname; } catch { /* non-fatal */ }
+  const suppressDomain = currentDomain ?? session.domain;
   let suppressFingerprints: Set<string> | undefined;
-  if (session.domain) {
-    const stableFPs = domainKnowledge.getStableFingerprints(session.domain, 3);
+  if (suppressDomain) {
+    const stableFPs = domainKnowledge.getStableFingerprints(suppressDomain, 3);
     if (stableFPs.length > 0) {
       suppressFingerprints = new Set(stableFPs);
     }
     // Merge interaction heat map suppress set (never-touched elements on mature domains)
-    const domainRecord = domainKnowledge.get(session.domain);
+    const domainRecord = domainKnowledge.get(suppressDomain);
     if (domainRecord) {
-      const heatSuppressSet = interactionTracker.getSuppressSet(session.domain, domainRecord.visitCount);
+      const heatSuppressSet = interactionTracker.getSuppressSet(suppressDomain, domainRecord.visitCount);
       if (heatSuppressSet.size > 0) {
         if (!suppressFingerprints) suppressFingerprints = new Set();
         for (const fp of heatSuppressSet) suppressFingerprints.add(fp);
       }
     }
   }
+
+  // BUG-8 fix: Mark all existing refs as stale before generating new ones.
+  // Only refs from the LATEST snapshot should be valid — previous refs may
+  // point to elements that no longer exist or have different positions.
+  session.staleRefThreshold = session.refCounter;
 
   const result = await snapEngine.snapshot(page, session, {
     interactiveOnly: true,
@@ -194,14 +203,20 @@ async function snapAndFormat(session: Session, opts?: { selector?: string; maxCh
   });
 
   // Record element fingerprints for stable element learning
-  if (session.domain && result.fingerprints && result.fingerprints.length > 0) {
-    domainKnowledge.recordElementFingerprints(session.domain, result.fingerprints);
+  // BUG-5 fix: Use the current page's domain, not the session's origin domain.
+  // session.domain is set once on first navigation and never updates, so navigating
+  // from HN to Substack would attribute Substack elements to HN.
+  let pageDomain: string | undefined;
+  try { pageDomain = new URL(page.url()).hostname; } catch { /* non-fatal */ }
+  const recordDomain = pageDomain ?? session.domain;
+  if (recordDomain && result.fingerprints && result.fingerprints.length > 0) {
+    domainKnowledge.recordElementFingerprints(recordDomain, result.fingerprints);
   }
 
   // Record element fingerprint→selector mappings for selector healing
-  if (session.domain && result.elementMappings && result.elementMappings.length > 0) {
+  if (recordDomain && result.elementMappings && result.elementMappings.length > 0) {
     for (const mapping of result.elementMappings) {
-      domainKnowledge.recordElement(session.domain, mapping.fingerprint, mapping.selector);
+      domainKnowledge.recordElement(recordDomain, mapping.fingerprint, mapping.selector);
     }
   }
 

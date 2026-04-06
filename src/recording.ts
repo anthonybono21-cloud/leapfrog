@@ -119,13 +119,42 @@ function resolveRef(value: string, refMap: Map<string, string>): string {
 }
 
 /**
- * Attempt to convert a Playwright aria-ref selector to a simpler CSS selector.
- * aria-ref=eN selectors are ephemeral — try to build a stable alternative.
- * For role-based selectors (role=button[name="OK"]), keep as-is since they're
- * already stable across page loads.
+ * BUG-7 fix: Convert aria-ref=eN selectors to stable alternatives.
+ * aria-ref=eN is a Playwright-internal locator that only works within the session
+ * that created the aria snapshot — exported scripts can't use them.
+ * Use the session's refFingerprints to build a role-based selector instead.
  */
-function stabilizeSelector(selector: string): string {
-  // aria-ref=eN → not stable; we can't convert without DOM access, so keep as-is
+function stabilizeSelector(selector: string, refMap: Map<string, string>, refFingerprints?: Map<string, string>): string {
+  // aria-ref=eN → ephemeral, needs conversion
+  if (selector.startsWith("aria-ref=")) {
+    // Try to find the original @eN ref that resolved to this selector,
+    // then use its fingerprint to build a role-based locator
+    if (refFingerprints) {
+      for (const [ref, storedSelector] of refMap) {
+        if (storedSelector === selector) {
+          const fp = refFingerprints.get(ref);
+          if (fp) {
+            // Fingerprint format is "role:name" — convert to role=role[name="name"]
+            const colonIdx = fp.indexOf(":");
+            if (colonIdx > 0) {
+              const role = fp.slice(0, colonIdx);
+              const name = fp.slice(colonIdx + 1);
+              if (name) {
+                const escaped = name.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+                return `role=${role}[name="${escaped}"]`;
+              }
+              return `role=${role}`;
+            }
+          }
+          break;
+        }
+      }
+    }
+    // No fingerprint available — can't stabilize, return as-is with warning
+    logger.warn("recording:unstable-selector", { selector });
+    return selector;
+  }
+
   // role=button[name="OK"] → already stable
   // CSS selectors → already stable
   return selector;
@@ -336,7 +365,7 @@ export function exportSession(
 
       if (target) {
         args.target = resolveRef(target, refMap);
-        args.target = stabilizeSelector(args.target as string);
+        args.target = stabilizeSelector(args.target as string, refMap, session.refFingerprints);
       }
       if (value !== undefined && value !== null) args.value = value;
       if (params.key) args.key = params.key;
@@ -344,7 +373,7 @@ export function exportSession(
       if (params.scrollAmount) args.scrollAmount = params.scrollAmount;
       if (params.target2) {
         args.target2 = resolveRef(params.target2 as string, refMap);
-        args.target2 = stabilizeSelector(args.target2 as string);
+        args.target2 = stabilizeSelector(args.target2 as string, refMap, session.refFingerprints);
       }
       if (params.filePaths) args.filePaths = params.filePaths;
       if (params.width) args.width = params.width;
@@ -360,7 +389,7 @@ export function exportSession(
           const args: Record<string, unknown> = { ...a };
           if (target) {
             args.target = resolveRef(target, refMap);
-            args.target = stabilizeSelector(args.target as string);
+            args.target = stabilizeSelector(args.target as string, refMap, session.refFingerprints);
           }
           steps.push({ tool: "act", args });
         }
@@ -370,7 +399,7 @@ export function exportSession(
       if (params.condition) args.condition = params.condition;
       if (params.target) {
         args.target = resolveRef(params.target as string, refMap);
-        args.target = stabilizeSelector(args.target as string);
+        args.target = stabilizeSelector(args.target as string, refMap, session.refFingerprints);
       }
       if (params.text) args.text = params.text;
       if (params.js) args.js = params.js;
@@ -408,7 +437,7 @@ export function exportSession(
       const args: Record<string, unknown> = { action: rec.actionType };
       if (rec.target) {
         args.target = resolveRef(rec.target, refMap);
-        args.target = stabilizeSelector(args.target as string);
+        args.target = stabilizeSelector(args.target as string, refMap, session.refFingerprints);
       }
       if (rec.value !== undefined) args.value = rec.value;
       steps.push({ tool: "act", args });

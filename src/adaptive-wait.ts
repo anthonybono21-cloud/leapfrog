@@ -433,6 +433,10 @@ async function stealthEscalate(
   let currentPage = page;
   let attempts = 0;
 
+  // BUG-2 fix: wrap escalation loop so we can clean up rotated sessions on failure.
+  // Without this, an exception after rotation leaves orphan sessions in the pool.
+  try {
+
   for (let level = 1; level <= effectiveMaxLevel && level <= 5; level++) {
     attempts++;
 
@@ -683,6 +687,17 @@ async function stealthEscalate(
     session: currentSession,
     page: currentPage,
   };
+
+  } catch (e) {
+    // BUG-2 fix: Clean up orphaned rotated session on unexpected failure.
+    // If we rotated to a new session but then hit an error, the rotated session
+    // would stay in the pool as an orphan that nobody can reference.
+    if (currentSession.id !== session.id) {
+      logger.warn("escalation:cleanup_orphan", { orphanId: currentSession.id, originalId: session.id });
+      sessionManager.destroySession(currentSession.id).catch(() => {});
+    }
+    throw e;
+  }
 }
 
 // ─── Main Entry Point ────────────────────────────────────────────────────────
@@ -810,6 +825,8 @@ export async function adaptiveNavigate(
   }
 
   // Escalation returned null (shouldn't happen, but handle gracefully)
+  // BUG-2 fix: use the original session/page here — if escalation returned null,
+  // no rotation happened so the original is still valid.
   const pageUrl = page.url();
   let title = "";
   try {

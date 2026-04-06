@@ -956,9 +956,11 @@ export class StealthMode {
    * - CDP stealth script (default ON, disable via LEAP_CDP_STEALTH=false)
    */
   async applyToPage(page: Page, userAgent?: string, fingerprint?: Fingerprint): Promise<void> {
-    const platform = userAgent
-      ? this.inferPlatformFromUA(userAgent)
-      : this.getPlatformFromProcess();
+    // BUG-1 fix: Always infer platform from the UA string that the browser is actually using.
+    // When no custom UA is provided, stealth sets the default Mac UA via getContextOptions(),
+    // so we must infer from that — not from the host OS (which would say Win32 on Windows).
+    const effectiveUA = userAgent ?? this.getDefaultUserAgent();
+    const platform = this.inferPlatformFromUA(effectiveUA);
 
     // Derive a session seed from the fingerprint for deterministic PRNG (Phase 2.2/2.3)
     const sessionSeed = fingerprint
