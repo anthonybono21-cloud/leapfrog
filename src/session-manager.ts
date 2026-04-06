@@ -202,6 +202,16 @@ export class SessionManager implements ISessionManager {
         ? true
         : !this.config.headless;
 
+    // ── Detect terminal screen early ─────────────────────────────────
+    // Must run BEFORE any browser window is created, while Terminal is
+    // still the frontmost app. Once Chromium opens a window it steals
+    // focus and the detection would find Chromium's screen instead.
+    let detectedScreen: { x: number; y: number; width: number; height: number } | null = null;
+    if (isHeaded) {
+      tileManager.redetectScreen();
+      detectedScreen = tileManager.getScreenSize();
+    }
+
     // ── CDP connect mode ────────────────────────────────────────────
     const cdpEndpoint = opts?.cdp ?? LEAP_CDP_ENDPOINT;
     let cdpConnected = false;
@@ -312,11 +322,7 @@ export class SessionManager implements ISessionManager {
     } else if (isHeaded && this.config.headless) {
       // ── Headed override on a headless server ─────────────────────
       // Can't reuse the shared headless browser — launch a separate headed one
-      // Re-detect screen right before launch — at startup the frontmost window
-      // may have been on a different screen than the terminal is now
-      if (tileManager.isEnabled()) {
-        tileManager.redetectScreen();
-      }
+      // Screen already detected early (before this branch).
       const launchArgs: string[] = [];
       if (stealth.isEnabled()) {
         launchArgs.push(...stealth.getLaunchArgs());
@@ -325,9 +331,13 @@ export class SessionManager implements ISessionManager {
       if (process.platform === 'win32') {
         launchArgs.push('--force-device-scale-factor=1');
       }
-      // ── Window tiling args ─────────────────────────────────────────
+      // ── Window position args ───────────────────────────────────────
+      // When tiling: grid position. Otherwise: just place on the detected screen.
+      const screen = tileManager.getScreenSize();
       if (tileManager.isEnabled()) {
         launchArgs.push(...tileManager.getLaunchTileArgs(this.sessions.size));
+      } else if (screen) {
+        launchArgs.push(`--window-position=${screen.x},${screen.y}`);
       }
       const chromiumForHeaded = await getChromium();
       // Force the full Chromium binary — Playwright's headless shell cannot render GUI windows
@@ -590,13 +600,21 @@ export class SessionManager implements ISessionManager {
 
     logger.info("session.created", { id, profilePath: opts?.profilePath });
 
-    // ── Window tiling (CDP positioning + reflow) ───────────────────
-    if (tileManager.isEnabled() && isHeaded && !cdpConnected) {
+    // ── Window positioning ─────────────────────────────────────────
+    // Use the screen detected early (before Chromium stole focus) to
+    // position only this new window. Existing windows stay put.
+    // Record the screen assignment so reflowAll keeps it on this screen.
+    if (isHeaded && !cdpConnected && detectedScreen) {
+      tileManager.assignSessionScreen(id, detectedScreen);
       try {
-        await tileManager.detectScreen(page);
-        await tileManager.reflowAll(this.sessions);
+        await tileManager.positionWindowWithBounds(page, id, {
+          x: detectedScreen.x,
+          y: detectedScreen.y,
+          width: Math.min(1280, detectedScreen.width),
+          height: Math.min(720, detectedScreen.height),
+        });
       } catch (e: any) {
-        logger.warn("tile.reflow_failed", { error: e.message });
+        logger.warn("tile.position_failed", { error: e.message });
       }
     }
 

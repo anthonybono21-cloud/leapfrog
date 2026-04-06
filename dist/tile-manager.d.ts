@@ -28,6 +28,8 @@ declare class TileManager {
     private padding;
     private screenSize;
     private windowIds;
+    /** Per-session screen assignment — windows stay on the screen where they were created. */
+    private sessionScreens;
     configure(opts: {
         layout: TileLayout;
         padding: number;
@@ -37,8 +39,19 @@ declare class TileManager {
     isEnabled(): boolean;
     getLayout(): TileLayout;
     getScreenSize(): ScreenWorkArea | null;
-    /** Re-run JXA screen detection (e.g., when frontmost window may have changed since startup). */
+    /** Re-run screen detection (e.g., when frontmost window may have changed since startup). */
     redetectScreen(): void;
+    /**
+     * Cross-platform terminal screen detection.
+     * macOS: JXA via osascript. Windows: PowerShell via System.Windows.Forms.
+     * Returns null if detection fails or platform is unsupported.
+     */
+    static detectTerminalScreen(): ScreenWorkArea | null;
+    /**
+     * Windows: detect which monitor contains the foreground window via PowerShell.
+     * Uses .NET System.Windows.Forms.Screen to map foreground window → screen bounds.
+     */
+    static detectScreenViaPowershell(): ScreenWorkArea | null;
     detectScreen(page: Page): Promise<ScreenWorkArea>;
     /**
      * macOS fallback: query visible frame via Python + AppKit.
@@ -66,6 +79,10 @@ declare class TileManager {
         globalIndex: number;
     }): string[];
     positionWindow(page: Page, sessionId: string): Promise<void>;
+    /** Record which screen a session was placed on so reflows keep it there. */
+    assignSessionScreen(sessionId: string, screen: ScreenWorkArea): void;
+    /** Get the screen assigned to a session, or the current global screen. */
+    getSessionScreen(sessionId: string): ScreenWorkArea | null;
     positionWindowWithBounds(page: Page, sessionId: string, bounds: TileBounds): Promise<void>;
     reflowAll(sessions: Map<string, Session>, multiTile?: MultiTileContext): Promise<void>;
     raiseAllWindows(sessions: Map<string, Session>): Promise<void>;

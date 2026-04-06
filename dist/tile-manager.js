@@ -21,6 +21,8 @@ class TileManager {
     padding = 8;
     screenSize = null;
     windowIds = new Map();
+    /** Per-session screen assignment — windows stay on the screen where they were created. */
+    sessionScreens = new Map();
     // ── Configuration ──────────────────────────────────────────────────
     configure(opts) {
         this.enabled = true;
@@ -34,9 +36,9 @@ class TileManager {
         else {
             // Eagerly detect the terminal's screen so launch args are correct from the first session.
             // Must happen before any browser launches, not lazily in detectScreen().
-            const jxaResult = TileManager.detectScreenViaOsascript();
-            if (jxaResult) {
-                this.screenSize = jxaResult;
+            const earlyResult = TileManager.detectTerminalScreen();
+            if (earlyResult) {
+                this.screenSize = earlyResult;
                 logger.info("tile.screen_detected_early", { ...this.screenSize });
             }
         }
@@ -51,13 +53,68 @@ class TileManager {
     getScreenSize() {
         return this.screenSize;
     }
-    /** Re-run JXA screen detection (e.g., when frontmost window may have changed since startup). */
+    /** Re-run screen detection (e.g., when frontmost window may have changed since startup). */
     redetectScreen() {
-        const result = TileManager.detectScreenViaOsascript();
+        const result = TileManager.detectTerminalScreen();
         if (result) {
             this.screenSize = result;
             logger.info("tile.screen_redetected", { ...this.screenSize });
         }
+    }
+    /**
+     * Cross-platform terminal screen detection.
+     * macOS: JXA via osascript. Windows: PowerShell via System.Windows.Forms.
+     * Returns null if detection fails or platform is unsupported.
+     */
+    static detectTerminalScreen() {
+        if (process.platform === "darwin") {
+            return TileManager.detectScreenViaOsascript();
+        }
+        if (process.platform === "win32") {
+            return TileManager.detectScreenViaPowershell();
+        }
+        return null;
+    }
+    /**
+     * Windows: detect which monitor contains the foreground window via PowerShell.
+     * Uses .NET System.Windows.Forms.Screen to map foreground window → screen bounds.
+     */
+    static detectScreenViaPowershell() {
+        try {
+            // PowerShell script:
+            // 1. Get foreground window handle via user32.dll
+            // 2. Get window RECT via user32.dll
+            // 3. Find which Screen contains that RECT
+            // 4. Output WorkingArea (excludes taskbar) as "x y width height"
+            const script = `powershell -NoProfile -NonInteractive -Command "
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -TypeDefinition '
+using System;
+using System.Runtime.InteropServices;
+public class WinAPI {
+  [DllImport(\\\"user32.dll\\\")] public static extern IntPtr GetForegroundWindow();
+  [DllImport(\\\"user32.dll\\\")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+}
+'
+$hwnd = [WinAPI]::GetForegroundWindow()
+$rect = New-Object WinAPI+RECT
+[void][WinAPI]::GetWindowRect($hwnd, [ref]$rect)
+$pt = New-Object System.Drawing.Point($rect.Left, $rect.Top)
+$scr = [System.Windows.Forms.Screen]::FromPoint($pt)
+$wa = $scr.WorkingArea
+Write-Output ('{0} {1} {2} {3}' -f $wa.X, $wa.Y, $wa.Width, $wa.Height)
+"`;
+            const result = execSync(script, { timeout: 10000, encoding: "utf-8" }).trim();
+            const parts = result.split(/\s+/).map(Number);
+            if (parts.length === 4 && parts.every((n) => !isNaN(n))) {
+                return { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
+            }
+        }
+        catch {
+            // PowerShell not available or permission denied
+        }
+        return null;
     }
     // ── Screen Detection ───────────────────────────────────────────────
     //
@@ -68,11 +125,11 @@ class TileManager {
     async detectScreen(page) {
         if (this.screenSize)
             return this.screenSize;
-        // Best method (macOS): detect which screen the terminal is on via JXA.
-        // This finds the correct monitor in multi-display setups.
-        const jxaResult = TileManager.detectScreenViaOsascript();
-        if (jxaResult) {
-            this.screenSize = jxaResult;
+        // Best method: detect which screen the terminal is on.
+        // macOS: JXA via osascript. Windows: PowerShell + System.Windows.Forms.
+        const terminalScreen = TileManager.detectTerminalScreen();
+        if (terminalScreen) {
+            this.screenSize = terminalScreen;
             logger.info("tile.screen_detected_terminal", { ...this.screenSize });
             return this.screenSize;
         }
@@ -121,10 +178,10 @@ class TileManager {
                 logger.info("tile.screen_detected_avail", { ...this.screenSize });
             }
             catch {
-                // Last resort: osascript or hardcoded
-                this.screenSize = TileManager.detectScreenViaOsascript();
+                // Last resort: platform-native detection or hardcoded
+                this.screenSize = TileManager.detectTerminalScreen();
                 if (this.screenSize) {
-                    logger.info("tile.screen_detected_osascript", { ...this.screenSize });
+                    logger.info("tile.screen_detected_native", { ...this.screenSize });
                 }
                 else {
                     this.screenSize = { x: 0, y: 25, width: 1920, height: 1055 };
@@ -284,6 +341,14 @@ if (found) { found; } else {
         // This is a low-level primitive; reflowAll calls it with correct bounds.
         logger.debug("tile.position_window", { sessionId });
     }
+    /** Record which screen a session was placed on so reflows keep it there. */
+    assignSessionScreen(sessionId, screen) {
+        this.sessionScreens.set(sessionId, screen);
+    }
+    /** Get the screen assigned to a session, or the current global screen. */
+    getSessionScreen(sessionId) {
+        return this.sessionScreens.get(sessionId) ?? this.screenSize;
+    }
     async positionWindowWithBounds(page, sessionId, bounds) {
         let cdp;
         try {
@@ -321,19 +386,31 @@ if (found) { found; } else {
         const entries = Array.from(sessions.entries());
         if (entries.length === 0)
             return;
-        // When multi-tile is active, use global count/indices so all instances
-        // share one unified grid. Otherwise fall back to local session count.
+        // Group sessions by their assigned screen so each screen gets its own grid.
+        // Sessions without an assigned screen use the current global screenSize.
+        const screenGroups = new Map();
+        for (const [id, session] of entries) {
+            const screen = this.sessionScreens.get(id) ?? this.screenSize;
+            const key = `${screen.x},${screen.y},${screen.width},${screen.height}`;
+            if (!screenGroups.has(key)) {
+                screenGroups.set(key, { screen, entries: [] });
+            }
+            screenGroups.get(key).entries.push([id, session]);
+        }
         const total = multiTile?.globalTotal ?? entries.length;
-        logger.info("tile.reflow", { total, local: entries.length, layout: this.layout });
-        // Position all windows (parallel for speed)
-        const results = await Promise.allSettled(entries.map(async ([id, session], localIndex) => {
-            const index = multiTile?.slotIndex.get(id) ?? localIndex;
-            const bounds = TileManager.getTileBounds(index, total, this.screenSize, this.padding, this.layout);
-            // Get active page — prefer pages array if available, fall back to session.page
-            const page = session.pages?.[session.activePageIndex ?? 0] ?? session.page;
-            if (!page || page.isClosed())
-                return;
-            await this.positionWindowWithBounds(page, id, bounds);
+        logger.info("tile.reflow", { total, local: entries.length, screens: screenGroups.size, layout: this.layout });
+        // Position windows per-screen (parallel for speed)
+        const results = await Promise.allSettled(Array.from(screenGroups.values()).flatMap(({ screen, entries: groupEntries }) => {
+            // Within each screen group, tile based on group size (not global total)
+            const groupTotal = multiTile ? total : groupEntries.length;
+            return groupEntries.map(async ([id, session], localIndex) => {
+                const index = multiTile?.slotIndex.get(id) ?? localIndex;
+                const bounds = TileManager.getTileBounds(index, groupTotal, screen, this.padding, this.layout);
+                const page = session.pages?.[session.activePageIndex ?? 0] ?? session.page;
+                if (!page || page.isClosed())
+                    return;
+                await this.positionWindowWithBounds(page, id, bounds);
+            });
         }));
         // Bring all windows to front after positioning
         await this.raiseAllWindows(sessions);
@@ -362,6 +439,7 @@ if (found) { found; } else {
     // ── Cleanup ────────────────────────────────────────────────────────
     removeSession(sessionId) {
         this.windowIds.delete(sessionId);
+        this.sessionScreens.delete(sessionId);
     }
 }
 export const tileManager = new TileManager();
