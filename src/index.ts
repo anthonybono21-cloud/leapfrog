@@ -98,24 +98,22 @@ if (LEAP_TILE && LEAP_TILE !== "false") {
   const defaultW = LEAP_SCREEN_WIDTH > 0 ? LEAP_SCREEN_WIDTH : 1920;
   const defaultH = LEAP_SCREEN_HEIGHT > 0 ? LEAP_SCREEN_HEIGHT : 1080;
   tilesCoord = new TilesCoordinator(defaultW, defaultH);
-  tilesCoord.watch((state) => {
-    // When another instance changes the grid, reflow our own windows
-    // using global slot count + indices so all instances share one grid.
-    if (tileManager.isEnabled()) {
-      const sessionMap = new Map<string, Session>();
-      for (const si of sessions.listSessions()) {
-        const sess = sessions.getSession(si.id);
-        if (sess) sessionMap.set(si.id, sess);
+  // File watcher only needed for multi-terminal mode (multiple Leapfrog instances).
+  // In single-instance mode, the watcher causes spurious reflows that fight
+  // with external monitor positioning. Only enable when explicitly requested.
+  if (LEAP_MULTI_TILE) {
+    tilesCoord.watch((state) => {
+      if (tileManager.isEnabled()) {
+        const sessionMap = new Map<string, Session>();
+        for (const si of sessions.listSessions()) {
+          const sess = sessions.getSession(si.id);
+          if (sess) sessionMap.set(si.id, sess);
+        }
+        logger.info("tile.watcher_reflow", { globalTotal: state.slots.length, local: sessionMap.size });
+        tileManager.reflowAll(sessionMap).catch((e) => logger.warn("tile.watcher_reflow_failed", { error: e?.message }));
       }
-      const slotIndex = new Map<string, number>();
-      state.slots.forEach((slot, idx) => slotIndex.set(slot.sessionId, idx));
-      logger.info("tile.watcher_reflow", { globalTotal: state.slots.length, local: sessionMap.size });
-      tileManager.reflowAll(sessionMap, {
-        globalTotal: state.slots.length,
-        slotIndex,
-      }).catch((e) => logger.warn("tile.watcher_reflow_failed", { error: e?.message }));
-    }
-  });
+    });
+  }
 }
 
 /** Build multi-tile context from coordinator, or undefined if not in multi-tile mode. */
@@ -357,7 +355,7 @@ server.registerTool(
         await session.context.tracing.start({ screenshots: true, snapshots: true });
       }
 
-      // Multi-terminal tiling: sync detected screen size, then claim a slot
+      // Multi-terminal tiling: sync detected screen size (including offset for external monitors), then claim a slot
       if (tilesCoord) {
         const detected = tileManager.getScreenSize();
         if (detected) {
@@ -366,8 +364,8 @@ server.registerTool(
         await tilesCoord.claimSlot(session.id).catch(() => {});
       }
 
-      // Reflow + raise all tiled windows after creating a new session
-      await reflowWithContext().catch(() => {});
+      // No CDP reflow on creation — launch args already positioned the window.
+      // CDP reflow on macOS multi-monitor moves windows to the wrong screen.
 
       const stats = sessions.getStats();
       return ok(

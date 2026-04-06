@@ -36,10 +36,9 @@ declare class TileManager {
     }): void;
     isEnabled(): boolean;
     getLayout(): TileLayout;
-    getScreenSize(): {
-        width: number;
-        height: number;
-    } | null;
+    getScreenSize(): ScreenWorkArea | null;
+    /** Re-run JXA screen detection (e.g., when frontmost window may have changed since startup). */
+    redetectScreen(): void;
     detectScreen(page: Page): Promise<ScreenWorkArea>;
     /**
      * macOS fallback: query visible frame via Python + AppKit.

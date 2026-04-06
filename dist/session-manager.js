@@ -72,8 +72,16 @@ export class SessionManager {
         if (this.config.channel) {
             launchOpts.channel = this.config.channel;
         }
+        const sharedArgs = [];
         if (stealth.isEnabled()) {
-            launchOpts.args = stealth.getLaunchArgs();
+            sharedArgs.push(...stealth.getLaunchArgs());
+        }
+        // When shared browser is headed, add tiling args for first window position
+        if (!this.config.headless && tileManager.isEnabled()) {
+            sharedArgs.push(...tileManager.getLaunchTileArgs(0));
+        }
+        if (sharedArgs.length > 0) {
+            launchOpts.args = sharedArgs;
         }
         const chromium = await getChromium();
         this.browser = await chromium.launch(launchOpts);
@@ -266,6 +274,11 @@ export class SessionManager {
         else if (isHeaded && this.config.headless) {
             // ── Headed override on a headless server ─────────────────────
             // Can't reuse the shared headless browser — launch a separate headed one
+            // Re-detect screen right before launch — at startup the frontmost window
+            // may have been on a different screen than the terminal is now
+            if (tileManager.isEnabled()) {
+                tileManager.redetectScreen();
+            }
             const launchArgs = [];
             if (stealth.isEnabled()) {
                 launchArgs.push(...stealth.getLaunchArgs());
@@ -287,7 +300,7 @@ export class SessionManager {
                 ...(this.config.channel ? { channel: this.config.channel } : {}),
                 ...(launchArgs.length > 0 ? { args: launchArgs } : {}),
             });
-            logger.info("browser.launched_headed_override", { channel: this.config.channel ?? "bundled" });
+            logger.info("browser.launched_headed_override", { channel: this.config.channel ?? "bundled", args: launchArgs.filter(a => a.startsWith('--window')) });
         }
         else {
             // ── Standard mode ─────────────────────────────────────────────

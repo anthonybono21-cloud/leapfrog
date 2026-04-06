@@ -65,8 +65,16 @@ class TileManager {
     if (opts.screenWidth && opts.screenHeight && opts.screenWidth > 0 && opts.screenHeight > 0) {
       this.screenSize = { x: 0, y: 0, width: opts.screenWidth, height: opts.screenHeight };
       logger.info("tile.screen_from_env", { width: opts.screenWidth, height: opts.screenHeight });
+    } else {
+      // Eagerly detect the terminal's screen so launch args are correct from the first session.
+      // Must happen before any browser launches, not lazily in detectScreen().
+      const jxaResult = TileManager.detectScreenViaOsascript();
+      if (jxaResult) {
+        this.screenSize = jxaResult;
+        logger.info("tile.screen_detected_early", { ...this.screenSize });
+      }
     }
-    logger.info("tile.configured", { layout: this.layout, padding: this.padding });
+    logger.info("tile.configured", { layout: this.layout, padding: this.padding, screen: this.screenSize });
   }
 
   isEnabled(): boolean {
@@ -77,8 +85,17 @@ class TileManager {
     return this.layout;
   }
 
-  getScreenSize(): { width: number; height: number } | null {
+  getScreenSize(): ScreenWorkArea | null {
     return this.screenSize;
+  }
+
+  /** Re-run JXA screen detection (e.g., when frontmost window may have changed since startup). */
+  redetectScreen(): void {
+    const result = TileManager.detectScreenViaOsascript();
+    if (result) {
+      this.screenSize = result;
+      logger.info("tile.screen_redetected", { ...this.screenSize });
+    }
   }
 
   // ── Screen Detection ───────────────────────────────────────────────
@@ -191,22 +208,22 @@ var primaryH = screens.objectAtIndex(0).frame.size.height;
 var cocoaTermY = primaryH - termY;
 
 // Find the screen containing the terminal
+var found = "";
 for (var i = 0; i < screens.count; i++) {
   var f = screens.objectAtIndex(i).frame;
   var vf = screens.objectAtIndex(i).visibleFrame;
   if (termX >= f.origin.x && termX < f.origin.x + f.size.width &&
       cocoaTermY >= f.origin.y && cocoaTermY < f.origin.y + f.size.height) {
-    var x = Math.round(vf.origin.x);
-    var y = Math.round(primaryH - vf.origin.y - vf.size.height);
-    var w = Math.round(vf.size.width);
-    var h = Math.round(vf.size.height);
-    x + " " + y + " " + w + " " + h;
+    found = Math.round(vf.origin.x) + " " + Math.round(primaryH - vf.origin.y - vf.size.height) + " " + Math.round(vf.size.width) + " " + Math.round(vf.size.height);
+    break;
   }
 }
 
-// Fallback: primary screen visible frame
-var vf = screens.objectAtIndex(0).visibleFrame;
-Math.round(vf.origin.x) + " " + Math.round(primaryH - vf.origin.y - vf.size.height) + " " + Math.round(vf.size.width) + " " + Math.round(vf.size.height);
+// Return matched screen, or fallback to primary
+if (found) { found; } else {
+  var vf0 = screens.objectAtIndex(0).visibleFrame;
+  Math.round(vf0.origin.x) + " " + Math.round(primaryH - vf0.origin.y - vf0.size.height) + " " + Math.round(vf0.size.width) + " " + Math.round(vf0.size.height);
+}
 '`;
       const result = execSync(script, { timeout: 5000, encoding: "utf-8" }).trim();
       const parts = result.split(/\s+/).map(Number);
