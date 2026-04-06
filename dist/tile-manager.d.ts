@@ -45,6 +45,11 @@ declare class TileManager {
      * macOS fallback: query visible frame via Python + AppKit.
      * Returns null on non-macOS or if the command fails.
      */
+    /**
+     * macOS: detect which screen the terminal is on via JXA (JavaScript for Automation).
+     * Works with any number of monitors in any arrangement.
+     * Falls back to the primary screen's main screen if terminal detection fails.
+     */
     static detectScreenViaOsascript(): ScreenWorkArea | null;
     static calculateGrid(n: number): {
         cols: number;

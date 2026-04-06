@@ -91,6 +91,15 @@ class TileManager {
   async detectScreen(page: Page): Promise<ScreenWorkArea> {
     if (this.screenSize) return this.screenSize;
 
+    // Best method (macOS): detect which screen the terminal is on via JXA.
+    // This finds the correct monitor in multi-display setups.
+    const jxaResult = TileManager.detectScreenViaOsascript();
+    if (jxaResult) {
+      this.screenSize = jxaResult;
+      logger.info("tile.screen_detected_terminal", { ...this.screenSize });
+      return this.screenSize;
+    }
+
     try {
       // Best approach: maximize the window, then read its outer bounds.
       // A maximized window IS the usable screen area — accounts for menu bar,
@@ -154,29 +163,58 @@ class TileManager {
    * macOS fallback: query visible frame via Python + AppKit.
    * Returns null on non-macOS or if the command fails.
    */
+  /**
+   * macOS: detect which screen the terminal is on via JXA (JavaScript for Automation).
+   * Works with any number of monitors in any arrangement.
+   * Falls back to the primary screen's main screen if terminal detection fails.
+   */
   static detectScreenViaOsascript(): ScreenWorkArea | null {
+    if (process.platform !== "darwin") return null;
+
     try {
-      // NSScreen.mainScreen().visibleFrame() returns the area excluding menu bar and Dock.
-      // visibleFrame origin is bottom-left (Cocoa coords), so we convert to top-left.
-      const script = `python3 -c "
-import AppKit
-s = AppKit.NSScreen.mainScreen()
-vf = s.visibleFrame()
-ff = s.frame()
-# Convert from Cocoa bottom-left origin to screen top-left origin
-x = int(vf.origin.x)
-y = int(ff.size.height - vf.origin.y - vf.size.height)
-w = int(vf.size.width)
-h = int(vf.size.height)
-print(f'{x} {y} {w} {h}')
-"`;
-      const result = execSync(script, { timeout: 3000, encoding: "utf-8" }).trim();
+      // JXA script: finds which NSScreen contains the frontmost terminal window.
+      // Uses System Events for terminal position + NSScreen for display geometry.
+      // Coordinate conversion: System Events uses top-left, NSScreen uses Cocoa bottom-left.
+      // Primary screen height bridges the two: cocoaY = primaryH - topLeftY
+      const script = `osascript -l JavaScript -e '
+ObjC.import("AppKit");
+var app = Application("System Events");
+var pos, termX = 0, termY = 0;
+try {
+  var fp = app.processes.whose({frontmost: true})[0];
+  pos = fp.windows[0].position();
+  termX = pos[0]; termY = pos[1];
+} catch(e) {}
+
+var screens = $.NSScreen.screens;
+var primaryH = screens.objectAtIndex(0).frame.size.height;
+var cocoaTermY = primaryH - termY;
+
+// Find the screen containing the terminal
+for (var i = 0; i < screens.count; i++) {
+  var f = screens.objectAtIndex(i).frame;
+  var vf = screens.objectAtIndex(i).visibleFrame;
+  if (termX >= f.origin.x && termX < f.origin.x + f.size.width &&
+      cocoaTermY >= f.origin.y && cocoaTermY < f.origin.y + f.size.height) {
+    var x = Math.round(vf.origin.x);
+    var y = Math.round(primaryH - vf.origin.y - vf.size.height);
+    var w = Math.round(vf.size.width);
+    var h = Math.round(vf.size.height);
+    x + " " + y + " " + w + " " + h;
+  }
+}
+
+// Fallback: primary screen visible frame
+var vf = screens.objectAtIndex(0).visibleFrame;
+Math.round(vf.origin.x) + " " + Math.round(primaryH - vf.origin.y - vf.size.height) + " " + Math.round(vf.size.width) + " " + Math.round(vf.size.height);
+'`;
+      const result = execSync(script, { timeout: 5000, encoding: "utf-8" }).trim();
       const parts = result.split(/\s+/).map(Number);
-      if (parts.length === 4 && parts.every((n) => !isNaN(n) && n >= 0)) {
+      if (parts.length === 4 && parts.every((n) => !isNaN(n))) {
         return { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
       }
     } catch {
-      // Not macOS or python3/AppKit unavailable — that's fine
+      // JXA not available or permission denied
     }
     return null;
   }
