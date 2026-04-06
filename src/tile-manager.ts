@@ -57,10 +57,15 @@ class TileManager {
 
   // ── Configuration ──────────────────────────────────────────────────
 
-  configure(opts: { layout: TileLayout; padding: number }): void {
+  configure(opts: { layout: TileLayout; padding: number; screenWidth?: number; screenHeight?: number }): void {
     this.enabled = true;
     this.layout = opts.layout;
     this.padding = opts.padding;
+    // Allow env-var-driven screen size to skip detection entirely
+    if (opts.screenWidth && opts.screenHeight && opts.screenWidth > 0 && opts.screenHeight > 0) {
+      this.screenSize = { x: 0, y: 0, width: opts.screenWidth, height: opts.screenHeight };
+      logger.info("tile.screen_from_env", { width: opts.screenWidth, height: opts.screenHeight });
+    }
     logger.info("tile.configured", { layout: this.layout, padding: this.padding });
   }
 

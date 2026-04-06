@@ -55,6 +55,8 @@ const ALLOW_EXECUTE = process.env.LEAP_ALLOW_EXECUTE !== "false";
 const LEAP_PROFILES_DIR = process.env.LEAP_PROFILES_DIR ?? path.join(os.homedir(), ".leapfrog", "chrome-profiles");
 const LEAP_TILE = process.env.LEAP_TILE;
 const LEAP_TILE_PADDING = Number(process.env.LEAP_TILE_PADDING ?? 8);
+const LEAP_SCREEN_WIDTH = Number(process.env.LEAP_SCREEN_WIDTH || 0);
+const LEAP_SCREEN_HEIGHT = Number(process.env.LEAP_SCREEN_HEIGHT || 0);
 const LEAP_MULTI_TILE = process.env.LEAP_MULTI_TILE === "true";
 const LEAP_HUD = process.env.LEAP_HUD === "true";
 const LEAP_AUTO_CONSENT = process.env.LEAP_AUTO_CONSENT !== "false"; // default ON
@@ -73,6 +75,8 @@ if (LEAP_TILE && LEAP_TILE !== "false") {
     tileManager.configure({
         layout: LEAP_TILE === "master" ? "master" : "grid",
         padding: Number.isFinite(LEAP_TILE_PADDING) ? LEAP_TILE_PADDING : 8,
+        screenWidth: LEAP_SCREEN_WIDTH > 0 ? LEAP_SCREEN_WIDTH : undefined,
+        screenHeight: LEAP_SCREEN_HEIGHT > 0 ? LEAP_SCREEN_HEIGHT : undefined,
     });
 }
 // Multi-terminal tile coordinator — active whenever tiling is on.
@@ -80,9 +84,10 @@ if (LEAP_TILE && LEAP_TILE !== "false") {
 // Zero cost for single-terminal (just tracks one instance). No extra env var needed.
 let tilesCoord = null;
 if (LEAP_TILE && LEAP_TILE !== "false") {
-    // Screen size is detected lazily by tileManager; use defaults until then.
-    // The coordinator will be fully initialized once the first session detects screen size.
-    tilesCoord = new TilesCoordinator(1920, 1080);
+    // Screen size: prefer env vars, fall back to 1920x1080. CDP detection will update later.
+    const defaultW = LEAP_SCREEN_WIDTH > 0 ? LEAP_SCREEN_WIDTH : 1920;
+    const defaultH = LEAP_SCREEN_HEIGHT > 0 ? LEAP_SCREEN_HEIGHT : 1080;
+    tilesCoord = new TilesCoordinator(defaultW, defaultH);
     tilesCoord.watch((state) => {
         // When another instance changes the grid, reflow our own windows
         // using global slot count + indices so all instances share one grid.
