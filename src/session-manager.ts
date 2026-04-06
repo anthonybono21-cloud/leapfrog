@@ -1,5 +1,5 @@
 import type { Browser, BrowserContext, Page } from "playwright-core";
-import { getChromium } from "./browser-launcher.js";
+import { getChromium, resolveHeadedExecutablePath } from "./browser-launcher.js";
 import type {
   Session,
   SessionCreateOptions,
@@ -278,10 +278,13 @@ export class SessionManager implements ISessionManager {
       // Chrome-native cookies with potentially empty Playwright-captured state.
       // Instead, launch clean and inject cookies after.
       const chromiumForProfile = await getChromium();
+      // Force full Chromium binary for headed profile sessions
+      const profileExePath = profileHeaded && !this.config.channel ? resolveHeadedExecutablePath() : undefined;
       context = await chromiumForProfile.launchPersistentContext(profileDir, {
         headless: !profileHeaded,
         viewport: opts?.viewport ?? this.config.defaultViewport,
         args: launchArgs.length > 0 ? launchArgs : undefined,
+        ...(profileExePath ? { executablePath: profileExePath } : {}),
         ...(this.config.channel ? { channel: this.config.channel } : {}),
       });
 
@@ -305,13 +308,20 @@ export class SessionManager implements ISessionManager {
       if (stealth.isEnabled()) {
         launchArgs.push(...stealth.getLaunchArgs());
       }
+      // Windows DPI: prevent Chromium from double-scaling window positions
+      if (process.platform === 'win32') {
+        launchArgs.push('--force-device-scale-factor=1');
+      }
       // ── Window tiling args ─────────────────────────────────────────
       if (tileManager.isEnabled()) {
         launchArgs.push(...tileManager.getLaunchTileArgs(this.sessions.size));
       }
       const chromiumForHeaded = await getChromium();
+      // Force the full Chromium binary — Playwright's headless shell cannot render GUI windows
+      const headedExePath = this.config.channel ? undefined : resolveHeadedExecutablePath();
       browser = await chromiumForHeaded.launch({
         headless: false,
+        ...(headedExePath ? { executablePath: headedExePath } : {}),
         ...(this.config.channel ? { channel: this.config.channel } : {}),
         ...(launchArgs.length > 0 ? { args: launchArgs } : {}),
       });

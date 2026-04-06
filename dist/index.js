@@ -47,7 +47,7 @@ if (!Number.isFinite(MAX_SESSIONS) || MAX_SESSIONS < 1)
     throw new Error("Invalid LEAP_MAX_SESSIONS");
 if (!Number.isFinite(IDLE_TIMEOUT_MS) || IDLE_TIMEOUT_MS < 0)
     throw new Error("Invalid LEAP_IDLE_TIMEOUT");
-const HEADLESS = process.env.LEAP_HEADLESS !== "false";
+const HEADLESS = process.env.LEAP_HEADED === "true" ? false : process.env.LEAP_HEADLESS !== "false";
 const CHANNEL = process.env.LEAP_CHANNEL || undefined; // "chrome" to use installed Chrome
 const MAX_SNAPSHOT_CHARS = 10000;
 const ALLOW_JS = process.env.LEAP_ALLOW_JS !== "false";
