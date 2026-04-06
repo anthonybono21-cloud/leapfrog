@@ -31,6 +31,12 @@ FROG-PERSONA.md
 LAUNCH-VIDEO-PLAN.md
 STRESS-TEST-V2-PLAN.md
 V5-MASTER.md
+MARKETING-STRATEGY-*.md
+OUTREACH-*.md
+COMPETITIVE-LANDSCAPE.md
+BLOG-*.md
+QA-*.md
+SESSION-*-PROMPT.md
 test-bot-sannysoft.png
 research/
 qa-loop/
@@ -41,5 +47,10 @@ internal/
 # Build artifacts
 dist/
 
-# Screenshots
+# Screenshots (keep hero.png and logo*.png)
 leapfrog-screenshots/
+*.png
+!hero.png
+!logo.png
+!logo-full.png
+!logo-400x400.png

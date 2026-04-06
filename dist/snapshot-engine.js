@@ -19,6 +19,18 @@ const INTERACTIVE_ROLES = new Set([
 ]);
 const STRUCTURAL_ROLES = new Set(["heading"]);
 const SKIP_ROLES = new Set(["none", "presentation", "generic"]);
+/** Form input roles that must NEVER be suppressed by stable element filtering. */
+const FORM_INPUT_ROLES = new Set([
+    "textbox",
+    "checkbox",
+    "radio",
+    "combobox",
+    "searchbox",
+    "spinbutton",
+    "slider",
+    "switch",
+    "listbox",
+]);
 // ─── YAML parser ───────────────────────────────────────────────────────────
 /**
  * Parses Playwright's YAML aria snapshot (mode: "ai") into structured nodes.
@@ -123,6 +135,13 @@ function shouldKeep(node, interactiveOnly) {
         return true;
     return false;
 }
+/**
+ * Build a case-insensitive fingerprint for a parsed node.
+ * Format: "role:lowercased_name" — e.g. "link:home", "button:sign in".
+ */
+export function elementFingerprint(node) {
+    return `${node.role}:${node.name.toLowerCase()}`;
+}
 function formatLine(ref, node, depth) {
     const indent = "  ".repeat(depth);
     const parts = [indent, ref, " ", node.role];
@@ -176,9 +195,32 @@ function walkTree(node, depth, ctx) {
         return;
     const keep = shouldKeep(node, ctx.interactiveOnly);
     if (keep) {
+        ctx.totalBeforeSuppression++;
+        const fp = elementFingerprint(node);
+        // Check suppression: skip stable elements unless they're form inputs
+        const isSuppressed = ctx.suppressFingerprints &&
+            ctx.suppressFingerprints.has(fp) &&
+            !FORM_INPUT_ROLES.has(node.role);
+        if (isSuppressed) {
+            ctx.suppressedCount++;
+            // Still recurse into children — they might not be stable
+            for (const child of node.children) {
+                if (ctx.truncated)
+                    break;
+                walkTree(child, depth, ctx);
+            }
+            return;
+        }
         ctx.session.refCounter++;
         const ref = `@e${ctx.session.refCounter}`;
-        ctx.session.refMap.set(ref, buildSelector(node));
+        const selector = buildSelector(node);
+        ctx.session.refMap.set(ref, selector);
+        // Record fingerprint for selector healing — maps @eN → "role:name"
+        if (ctx.session.refFingerprints) {
+            ctx.session.refFingerprints.set(ref, fp);
+        }
+        // Track fingerprint → selector for domain knowledge recording
+        ctx.elementMappings.push({ fingerprint: fp, selector });
         const line = formatLine(ref, node, depth);
         const lineLen = line.length + 1;
         if (ctx.maxChars > 0 && ctx.charCount + lineLen > ctx.maxChars) {
@@ -188,6 +230,7 @@ function walkTree(node, depth, ctx) {
         ctx.lines.push(line);
         ctx.charCount += lineLen;
         ctx.nodeCount++;
+        ctx.fingerprints.push(fp);
     }
     // Recurse — if we skipped this node, children bubble up to the same depth
     const childDepth = keep ? depth + 1 : depth;
@@ -195,6 +238,20 @@ function walkTree(node, depth, ctx) {
         if (ctx.truncated)
             break;
         walkTree(child, childDepth, ctx);
+    }
+}
+/** Lightweight counting pass — no ref assignment, no line building. */
+function walkTreeCount(node, depth, ctx) {
+    if (depth > ctx.maxDepth)
+        return;
+    const keep = shouldKeep(node, ctx.interactiveOnly);
+    if (keep) {
+        ctx.totalBeforeSuppression++;
+        ctx.fingerprints.push(elementFingerprint(node));
+    }
+    const childDepth = keep ? depth + 1 : depth;
+    for (const child of node.children) {
+        walkTreeCount(child, childDepth, ctx);
     }
 }
 // ─── Engine ────────────────────────────────────────────────────────────────
@@ -237,6 +294,47 @@ export class SnapshotEngine {
         }
         // Parse YAML into structured nodes
         const roots = parseAriaYaml(yaml);
+        // Build effective suppress set, respecting the 60% floor:
+        // If suppressing would remove more than 60% of elements, limit to highest-usage only.
+        // We do a two-pass approach when suppression is requested:
+        //   Pass 1: count total keepable elements (no suppression)
+        //   Pass 2: apply suppression, capped at 60% of total
+        let effectiveSuppress = opts?.suppressFingerprints;
+        if (effectiveSuppress && effectiveSuppress.size > 0) {
+            // Pass 1: count total keepable (without suppression)
+            const countCtx = {
+                session: { ...session, refCounter: session.refCounter, refMap: new Map() },
+                interactiveOnly,
+                maxDepth,
+                lines: [],
+                nodeCount: 0,
+                charCount: 0,
+                maxChars: 0,
+                truncated: false,
+                fingerprints: [],
+                elementMappings: [],
+                suppressedCount: 0,
+                totalBeforeSuppression: 0,
+            };
+            for (const root of roots) {
+                walkTreeCount(root, 0, countCtx);
+            }
+            const totalKeepable = countCtx.totalBeforeSuppression;
+            const maxSuppressable = Math.floor(totalKeepable * 0.6);
+            // Count how many would be suppressed
+            let wouldSuppress = 0;
+            for (const fp of countCtx.fingerprints) {
+                if (effectiveSuppress.has(fp) && !FORM_INPUT_ROLES.has(fp.split(":")[0])) {
+                    wouldSuppress++;
+                }
+            }
+            if (wouldSuppress > maxSuppressable) {
+                // Need to limit — but we don't have seenCount here.
+                // The caller should pre-limit. As a safety net, just clear suppression.
+                // In practice, the caller (index.ts) handles the 60% cap with seenCount ordering.
+                effectiveSuppress = undefined;
+            }
+        }
         // Walk and filter
         const ctx = {
             session,
@@ -247,6 +345,11 @@ export class SnapshotEngine {
             charCount: 0,
             maxChars,
             truncated: false,
+            fingerprints: [],
+            elementMappings: [],
+            suppressFingerprints: effectiveSuppress,
+            suppressedCount: 0,
+            totalBeforeSuppression: 0,
         };
         for (const root of roots) {
             if (ctx.truncated)
@@ -260,10 +363,17 @@ export class SnapshotEngine {
         if (ctx.nodeCount === 0) {
             text = "(no interactive elements found)";
         }
+        const elementsSuppressed = ctx.suppressedCount;
+        const elementsTotal = ctx.totalBeforeSuppression;
         return {
             text,
             refs: session.refMap,
             nodeCount: ctx.nodeCount,
+            fingerprints: ctx.fingerprints,
+            elementMappings: ctx.elementMappings,
+            elementsTotal,
+            elementsSuppressed,
+            tokensSaved: elementsSuppressed > 0 ? elementsSuppressed * 30 : 0,
         };
     }
 }

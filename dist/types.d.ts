@@ -46,6 +46,8 @@ export interface Session {
     refCounter: number;
     /** Map from @eN ref string to Playwright locator selector */
     refMap: Map<string, string>;
+    /** Map from @eN ref string to element fingerprint ("role:name") for selector healing */
+    refFingerprints?: Map<string, string>;
     profilePath?: string;
     /** Profile shorthand name used to create this session (e.g. "github"). Used for auto-saving storageState on destroy. */
     profileName?: string;
@@ -179,11 +181,26 @@ export interface SnapshotOptions {
     maxDepth?: number;
     /** Max characters in output */
     maxChars?: number;
+    /** Set of element fingerprints ("role:name") to suppress from output */
+    suppressFingerprints?: Set<string>;
 }
 export interface SnapshotResult {
     text: string;
     refs: Map<string, string>;
     nodeCount: number;
+    /** Element fingerprints ("role:name") of all kept elements in the snapshot */
+    fingerprints?: string[];
+    /** Fingerprint-to-selector mappings for domain knowledge recording (selector healing) */
+    elementMappings?: Array<{
+        fingerprint: string;
+        selector: string;
+    }>;
+    /** Total elements before suppression */
+    elementsTotal?: number;
+    /** Elements suppressed by stable element filter */
+    elementsSuppressed?: number;
+    /** Estimated tokens saved from suppression (~30 chars per element) */
+    tokensSaved?: number;
 }
 export interface ISnapshotEngine {
     snapshot(page: Page, session: Session, opts?: SnapshotOptions): Promise<SnapshotResult>;

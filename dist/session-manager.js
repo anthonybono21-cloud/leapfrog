@@ -33,12 +33,7 @@ const LEAP_MAX_SESSIONS_PER_CLIENT = process.env.LEAP_MAX_SESSIONS_PER_CLIENT
 const LEAP_STORAGE_PROFILES_DIR = process.env.LEAP_STORAGE_PROFILES_DIR ??
     path.join(os.homedir(), ".leapfrog", "profiles");
 function generateId() {
-    const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-    let result = "s_";
-    for (let i = 0; i < 6; i++) {
-        result += chars[Math.floor(Math.random() * chars.length)];
-    }
-    return result;
+    return "s_" + crypto.randomUUID().replace(/-/g, "").slice(0, 6);
 }
 export class SessionManager {
     config;
@@ -500,6 +495,7 @@ export class SessionManager {
             lastUsedAt: now,
             refCounter: 0,
             refMap: new Map(),
+            refFingerprints: new Map(),
             navGeneration: 0,
             refNavGeneration: 0,
             profilePath: opts?.profilePath,

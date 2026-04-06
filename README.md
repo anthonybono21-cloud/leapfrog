@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">Leapfrog</h1>
-<p align="center"><strong>Multi-session browser MCP for AI agents.</strong><br/>34 tools. 15 parallel sessions. Stealth. HUD. Self-improvement. Up to 10x fewer tokens.</p>
+<p align="center"><strong>Multi-session browser MCP for AI agents.</strong><br/>36 tools. 15 parallel sessions. Stealth. HUD. Self-improvement. Up to 10x fewer tokens.</p>
 
 <p align="center">
 <code>npm i leapfrog</code>&nbsp;&nbsp;|&nbsp;&nbsp;Works with Claude Code, Cursor, Windsurf
@@ -84,6 +84,8 @@ Leapfrog uses `playwright-core` (15MB) instead of `playwright` (1.6GB) and does 
 | Session memory | Yes | No | No |
 | API intelligence | Yes | No | No |
 | Adaptive wait + auto-retry | Yes | No | No |
+| CAPTCHA auto-resolve | Yes | No | No |
+| Self-improvement (9 dims) | Yes | No | No |
 | Record / replay | Yes | No | No |
 | Pagination extraction | Yes | No | No |
 | Incremental snapshots (diff) | Yes | No | No |
@@ -187,18 +189,25 @@ The `diff` tool returns only what changed since the last snapshot — additions,
 When running headed, Leapfrog overlays visual feedback on every session:
 
 - **Click ripple** — expanding green circle at click coordinates (agent actions only)
+- **Zoom-to-target** — browser zooms to 1.15x on the clicked element briefly so agents (and humans) can visually track what's happening in tiled windows
 - **Scroll-to-target** — scrollIntoView before clicks so you can see what the agent is about to click
 
 Minimal by design. No borders, no status bars, no cursor overlay — just the feedback that matters.
 
+## Multi-Terminal Tiling (`LEAP_TILE=true`)
+
+Multiple Leapfrog instances share the screen via file-based coordination. Each instance tracks its own windows and a TilesCoordinator assigns global grid slots — no overlap, no manual arrangement. Set `LEAP_TILE=true` (or `LEAP_TILE=master` for the primary instance). Padding between tiles is configurable with `LEAP_TILE_PADDING` (default 8px).
+
 ## Human Intervention
 
-Leapfrog auto-detects situations that need a human — CAPTCHAs, login forms, OAuth redirects, Cloudflare challenges — and pauses the agent until you handle it.
+Leapfrog auto-detects situations that need a human — CAPTCHAs, login forms, OAuth redirects, Cloudflare challenges — and tries to self-resolve before pausing.
 
+- **Auto-resolves first:** clicks reCAPTCHA checkboxes, Cloudflare verify buttons, generic verify/continue buttons, then a second-pass retry — all before asking for help
+- **External solvers:** set `LEAP_CAPTCHA_PROVIDER` + `LEAP_CAPTCHA_API_KEY` for CapSolver, 2Captcha, or NopeCHA integration
+- **Learns what works:** remembers which resolution method succeeded per domain and tries the known-good method first on revisit
 - Detects reCAPTCHA, hCaptcha, Turnstile, login forms, OAuth redirects, Cloudflare challenges
-- Red persistent top bar (32px, #ef4444) with reason text + tab title changes to "NEEDS HUMAN" + chime
-- Sound chime + macOS notification on detection
-- `wait_for_human` tool — agent calls when stuck, blocks until you click Done
+- Tab title changes to "NEEDS HUMAN" when intervention is needed
+- `wait_for_human` tool — agent calls when stuck, blocks until you resolve it or navigate past
 
 ## Cookie Consent Auto-Dismiss (`LEAP_AUTO_CONSENT=true`)
 
@@ -210,12 +219,21 @@ Per-session Playwright tracing with screenshots + DOM snapshots. Export ZIP file
 
 ## Self-Improvement
 
-Leapfrog learns from experience. Per-domain knowledge stored at `~/.leapfrog/domains/`:
+Leapfrog learns from every visit. Per-domain knowledge persists at `~/.leapfrog/domains/{domain}.json` — 9 dimensions, all automatic:
 
-- **Wait strategy learning** — records which wait method worked per domain + running average timing
-- **Stealth tier learning** — auto-escalates after blocks, starts at the learned tier on revisit
-- **API endpoint caching** — remembers discovered endpoints for faster API intelligence
-- LRU eviction at 500 domains. Inspect with the `domain_knowledge` tool.
+| # | Dimension | What it does |
+|---|---|---|
+| 1 | **Wait strategies** | Learns optimal wait method per domain (`networkidle` vs `domcontentloaded` vs `load`) + running average timing |
+| 2 | **Stealth tiers** | Auto-escalates 0→3 when blocks are detected (2+ blocks in 1 hour). Starts at learned tier on revisit |
+| 3 | **Consent selectors** | Remembers cookie banner dismiss selectors, auto-clicks on revisit |
+| 4 | **Challenge resolution** | Records which CAPTCHA method worked (reCAPTCHA checkbox, Cloudflare verify, etc.), tries known-good method first |
+| 5 | **Stable element suppression** | Identifies nav/footer/sidebar elements seen 3+ visits, suppresses from snapshots (30-40% token savings on mature domains) |
+| 6 | **Selector healing** | Remembers element fingerprints → selectors, heals broken refs across visits |
+| 7 | **API endpoint caching** | Discovered API endpoints persist across sessions |
+| 8 | **Interaction heat maps** | Tracks which elements agents actually use, suppresses untouched elements _(coming)_ |
+| 9 | **Strategy selection** | Adversarial bandit (EXP3) for stealth config optimization _(coming)_ |
+
+LRU eviction at 500 domains. Inspect with the `domain_knowledge` tool.
 
 ## SSRF Hardening
 
@@ -235,9 +253,9 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | Console errors | **Croak** | Something went wrong in the browser |
 | Stealth mode | **Camouflage** | Anti-bot evasion patches |
 
-## All 34 Tools
+## All 36 Tools
 
-### Pond Management (9)
+### Pond Management (11)
 
 | Tool | What it does |
 |---|---|
@@ -250,6 +268,8 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | `session_health` | Is the pond healthy? Browser connected, page responsive? |
 | `profile_list` | List saved persistent browser profiles |
 | `profile_delete` | Delete a saved persistent browser profile and its data |
+| `profile_import_from_chrome` | Import cookies and state from an installed Chrome profile |
+| `profile_warm` | Pre-warm a profile by loading key URLs to establish cookies/state |
 
 ### Navigation & Snapshots (12)
 
@@ -310,18 +330,25 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | `LEAP_ALLOW_EXECUTE` | `true` | Allow the `execute` tool (sandboxed Playwright scripts) |
 | `LEAP_BLOCK_LOCALHOST` | `false` | Block localhost/127.x.x.x (allowed by default for local dev) |
 | `LEAP_PROFILES_DIR` | `~/.leapfrog/chrome-profiles` | Directory for persistent browser profiles |
-| `LEAP_TILE` | `false` | Tile sessions in a grid and start sidecar HTTP server on `:9222` |
-| `LEAP_HUD` | `false` | Click ripple on agent actions and scroll-to-target |
+| `LEAP_TILE` | `false` | Tile sessions in a grid (`true` \| `master` \| `false`) |
+| `LEAP_TILE_PADDING` | `8` | Padding between tiled windows (px) |
+| `LEAP_HUD` | `false` | Click ripple, zoom-to-target, scroll-to-target on agent actions |
 | `LEAP_SOUND` | `false` | Marimba chime on intervention detection (macOS) |
 | `LEAP_NOTIFY` | `false` | macOS notification center alerts on intervention detection |
 | `LEAP_AUTO_CONSENT` | `true` | Auto-dismiss cookie consent banners (10 frameworks + fallback) |
 | `LEAP_TRACE` | `false` | Per-session Playwright tracing (screenshots + DOM snapshots) |
+| `LEAP_RECORD` | `false` | Session recording (action history export) |
+| `LEAP_SIDECAR_PORT` | `9222` | Sidecar HTTP server port (used with tiling) |
+| `LEAP_CDP_STEALTH` | `true` | CDP detection evasion (`Runtime.enable` filtering) |
+| `LEAP_CAPTCHA_PROVIDER` | _(none)_ | External CAPTCHA solver: `capsolver` \| `2captcha` \| `nopecha` |
+| `LEAP_CAPTCHA_API_KEY` | _(none)_ | API key for the configured CAPTCHA provider |
+| `LEAP_MAX_SESSIONS_PER_CLIENT` | _(none)_ | Per-client session pool limit |
 | `LEAP_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 
 ## Tests
 
 ```
- 778 passing across 31 suites
+ 815 passing across 33 suites
 ```
 
 Session management, snapshot engine, network intelligence, tab management, security, SSRF protection, stealth patches (19), humanization (mouse, typing, scroll), page classification, harness intelligence, API intelligence, script executor, extended actions, HUD overlays, human intervention, cookie consent, domain knowledge, tracing, sidecar HTTP, bug regression, stress tests, benchmarks.

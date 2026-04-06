@@ -224,6 +224,24 @@ export class TilesCoordinator {
   }
 
   /**
+   * Update the screen dimensions used for grid calculations.
+   * Call this after detecting the real screen size (e.g., via CDP maximize).
+   * Triggers a recalculation of all slot positions in the shared state.
+   */
+  async updateScreenSize(width: number, height: number): Promise<void> {
+    if (width === this.screenWidth && height === this.screenHeight) return;
+    this.screenWidth = width;
+    this.screenHeight = height;
+    return withLock(async () => {
+      const state = readState(this.screenWidth, this.screenHeight);
+      state.screenWidth = width;
+      state.screenHeight = height;
+      recalculatePositions(state);
+      writeState(state);
+    });
+  }
+
+  /**
    * Claim a grid slot for the given session.
    *
    * Dead-PID slots are reaped first, then the new session is appended

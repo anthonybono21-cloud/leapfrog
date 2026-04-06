@@ -40,6 +40,8 @@ import { solveCaptcha, isCaptchaSolverEnabled } from "./captcha-solver.js";
 import { domainKnowledge, normalizeDomain } from "./domain-knowledge.js";
 import type { NavigationHints } from "./domain-knowledge.js";
 import { TilesCoordinator } from "./tiles-coordinator.js";
+import { strategyManager } from "./stealth-bandit.js";
+import { interactionTracker } from "./interaction-tracker.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
@@ -162,11 +164,43 @@ function getPage(session: Session) {
 
 async function snapAndFormat(session: Session, opts?: { selector?: string; maxChars?: number }): Promise<string> {
   const page = getPage(session);
+
+  // Load stable element suppress set from domain knowledge
+  let suppressFingerprints: Set<string> | undefined;
+  if (session.domain) {
+    const stableFPs = domainKnowledge.getStableFingerprints(session.domain, 3);
+    if (stableFPs.length > 0) {
+      suppressFingerprints = new Set(stableFPs);
+    }
+    // Merge interaction heat map suppress set (never-touched elements on mature domains)
+    const domainRecord = domainKnowledge.get(session.domain);
+    if (domainRecord) {
+      const heatSuppressSet = interactionTracker.getSuppressSet(session.domain, domainRecord.visitCount);
+      if (heatSuppressSet.size > 0) {
+        if (!suppressFingerprints) suppressFingerprints = new Set();
+        for (const fp of heatSuppressSet) suppressFingerprints.add(fp);
+      }
+    }
+  }
+
   const result = await snapEngine.snapshot(page, session, {
     interactiveOnly: true,
     maxChars: opts?.maxChars ?? MAX_SNAPSHOT_CHARS,
     selector: opts?.selector,
+    suppressFingerprints,
   });
+
+  // Record element fingerprints for stable element learning
+  if (session.domain && result.fingerprints && result.fingerprints.length > 0) {
+    domainKnowledge.recordElementFingerprints(session.domain, result.fingerprints);
+  }
+
+  // Record element fingerprint→selector mappings for selector healing
+  if (session.domain && result.elementMappings && result.elementMappings.length > 0) {
+    for (const mapping of result.elementMappings) {
+      domainKnowledge.recordElement(session.domain, mapping.fingerprint, mapping.selector);
+    }
+  }
 
   // Mark refs as fresh — they match the current nav generation
   session.refNavGeneration = session.navGeneration ?? 0;
@@ -175,7 +209,13 @@ async function snapAndFormat(session: Session, opts?: { selector?: string; maxCh
   let title = "";
   try { title = await page.title(); } catch { /* */ }
 
-  return `[${session.id}] ${title}\n${url}\n${result.nodeCount} elements\n\n${result.text}`;
+  let output = `[${session.id}] ${title}\n${url}\n${result.nodeCount} elements`;
+  if (result.elementsSuppressed && result.elementsSuppressed > 0) {
+    output += ` (${result.elementsSuppressed} suppressed, ~${result.tokensSaved} tokens saved)`;
+  }
+  output += `\n\n${result.text}`;
+
+  return output;
 }
 
 const PROFILE_DIR = path.join(os.homedir(), ".leapfrog", "profiles");
@@ -312,8 +352,12 @@ server.registerTool(
         await session.context.tracing.start({ screenshots: true, snapshots: true });
       }
 
-      // Multi-terminal tiling: claim a slot for this session
+      // Multi-terminal tiling: sync detected screen size, then claim a slot
       if (tilesCoord) {
+        const detected = tileManager.getScreenSize();
+        if (detected) {
+          await tilesCoord.updateScreenSize(detected.width, detected.height).catch(() => {});
+        }
         await tilesCoord.claimSlot(session.id).catch(() => {});
       }
 
@@ -614,6 +658,9 @@ server.registerTool(
         effectiveMaxRetryLevel = Math.max(maxRetryLevel, hints.stealthTier + 1);
       }
 
+      // EXP3 bandit: select stealth strategy for this domain
+      const banditSelection = strategyManager.selectStrategy(urlDomain);
+
       // Adaptive navigate with wait strategy selection + stealth escalation
       const result = await adaptiveNavigate(page, session, url, sessions, {
         waitUntil: effectiveWaitUntil,
@@ -650,13 +697,29 @@ server.registerTool(
       const navDuration = Date.now() - startTime;
       domainKnowledge.recordNavigation(urlDomain, effectiveWaitUntil, navDuration);
 
+      // Record element fingerprints for stable element learning
+      if (result.snapshot.fingerprints && result.snapshot.fingerprints.length > 0) {
+        domainKnowledge.recordElementFingerprints(urlDomain, result.snapshot.fingerprints);
+      }
+
+      // Record element fingerprint→selector mappings for selector healing
+      if (result.snapshot.elementMappings && result.snapshot.elementMappings.length > 0) {
+        for (const mapping of result.snapshot.elementMappings) {
+          domainKnowledge.recordElement(urlDomain, mapping.fingerprint, mapping.selector);
+        }
+      }
+
       // Record block event — feeds stealth tier escalation on revisit
-      if (result.quality === "BLOCKED" || result.classification.type === "challenge") {
+      const wasBlocked = result.quality === "BLOCKED" || result.classification.type === "challenge";
+      if (wasBlocked) {
         const reason = result.classification.type === "challenge"
           ? `challenge:${result.classification.signals?.join(",") ?? "unknown"}`
           : `blocked:${result.escalation?.label ?? "initial"}`;
         domainKnowledge.recordBlock(urlDomain, reason);
       }
+
+      // EXP3 bandit: record outcome (success=1 if not blocked, 0 if blocked)
+      strategyManager.recordOutcome(urlDomain, banditSelection.armIndex, !wasBlocked);
 
       // Auto-dismiss known consent selector from domain knowledge
       if (hints.consentSelector) {
@@ -732,6 +795,41 @@ server.registerTool(
           if (intervention.type === 'captcha' || intervention.type === 'challenge') {
             logger.info("intervention.auto-attempt", { sessionId, type: intervention.type });
 
+            // Check if we have a learned method for this domain — try it FIRST
+            const learnedMethod = domainKnowledge.getLearnedChallengeMethod(urlDomain);
+            if (learnedMethod && !selfResolved) {
+              try {
+                if (learnedMethod === 'recaptcha-checkbox') {
+                  const recaptchaFrame = result.page.frameLocator('iframe[src*="recaptcha"]');
+                  await recaptchaFrame.locator('#recaptcha-anchor').click({ timeout: 2000 });
+                  await new Promise(r => setTimeout(r, 3000));
+                } else if (learnedMethod === 'cloudflare-checkbox') {
+                  const cfFrame = result.page.frameLocator('iframe[src*="challenges.cloudflare"]');
+                  await cfFrame.locator('input[type="checkbox"], label').first().click({ timeout: 2000 });
+                  await new Promise(r => setTimeout(r, 3000));
+                } else if (learnedMethod === 'verify-button') {
+                  await result.page.evaluate(() => {
+                    const buttons = document.querySelectorAll('button, input[type="submit"], a[role="button"]');
+                    for (const btn of buttons) {
+                      const text = (btn.textContent || '').toLowerCase().trim();
+                      if (/^(verify|continue|i.m human|i am human|proceed|submit)$/i.test(text)) {
+                        (btn as HTMLElement).click();
+                        return true;
+                      }
+                    }
+                    return false;
+                  });
+                  await new Promise(r => setTimeout(r, 3000));
+                }
+                const recheckLearned = parseDetectionResult(await result.page.evaluate(getDetectionCheckScript()));
+                if (!recheckLearned) {
+                  selfResolved = true;
+                  logger.info("intervention.auto-resolved-learned", { sessionId, method: learnedMethod });
+                  domainKnowledge.recordChallengeResolution(urlDomain, learnedMethod);
+                }
+              } catch { /* learned method failed — fall through to standard cascade */ }
+            }
+
             // Attempt 1: Click reCAPTCHA "I'm not a robot" checkbox
             try {
               const recaptchaFrame = result.page.frameLocator('iframe[src*="recaptcha"]');
@@ -739,7 +837,7 @@ server.registerTool(
               await new Promise(r => setTimeout(r, 3000));
               // Re-check if it resolved
               const recheck1 = parseDetectionResult(await result.page.evaluate(getDetectionCheckScript()));
-              if (!recheck1) { selfResolved = true; logger.info("intervention.auto-resolved", { sessionId, method: "recaptcha-checkbox" }); }
+              if (!recheck1) { selfResolved = true; logger.info("intervention.auto-resolved", { sessionId, method: "recaptcha-checkbox" }); domainKnowledge.recordChallengeResolution(urlDomain, "recaptcha-checkbox"); }
             } catch { /* reCAPTCHA frame not found or click failed — continue */ }
 
             // Attempt 2: Click Cloudflare challenge verify button
@@ -749,7 +847,7 @@ server.registerTool(
                 await cfFrame.locator('input[type="checkbox"], label').first().click({ timeout: 2000 });
                 await new Promise(r => setTimeout(r, 3000));
                 const recheck2 = parseDetectionResult(await result.page.evaluate(getDetectionCheckScript()));
-                if (!recheck2) { selfResolved = true; logger.info("intervention.auto-resolved", { sessionId, method: "cloudflare-checkbox" }); }
+                if (!recheck2) { selfResolved = true; logger.info("intervention.auto-resolved", { sessionId, method: "cloudflare-checkbox" }); domainKnowledge.recordChallengeResolution(urlDomain, "cloudflare-checkbox"); }
               } catch { /* Cloudflare frame not found — continue */ }
             }
 
@@ -769,8 +867,32 @@ server.registerTool(
                 });
                 await new Promise(r => setTimeout(r, 3000));
                 const recheck3 = parseDetectionResult(await result.page.evaluate(getDetectionCheckScript()));
-                if (!recheck3) { selfResolved = true; logger.info("intervention.auto-resolved", { sessionId, method: "verify-button" }); }
+                if (!recheck3) { selfResolved = true; logger.info("intervention.auto-resolved", { sessionId, method: "verify-button" }); domainKnowledge.recordChallengeResolution(urlDomain, "verify-button"); }
               } catch { /* button click failed — continue */ }
+            }
+
+            // Attempt 4: Second-pass retry — wait 2s and try all methods again
+            // Some challenges need time for JS to initialize the checkbox
+            if (!selfResolved) {
+              await new Promise(r => setTimeout(r, 2000));
+              // Retry reCAPTCHA
+              try {
+                const recaptchaFrame2 = result.page.frameLocator('iframe[src*="recaptcha"]');
+                await recaptchaFrame2.locator('#recaptcha-anchor').click({ timeout: 2000 });
+                await new Promise(r => setTimeout(r, 3000));
+                const recheck4 = parseDetectionResult(await result.page.evaluate(getDetectionCheckScript()));
+                if (!recheck4) { selfResolved = true; logger.info("intervention.auto-resolved", { sessionId, method: "recaptcha-checkbox-retry" }); domainKnowledge.recordChallengeResolution(urlDomain, "recaptcha-checkbox"); }
+              } catch { /* retry failed — continue */ }
+              // Retry Cloudflare
+              if (!selfResolved) {
+                try {
+                  const cfFrame2 = result.page.frameLocator('iframe[src*="challenges.cloudflare"]');
+                  await cfFrame2.locator('input[type="checkbox"], label, button').first().click({ timeout: 2000 });
+                  await new Promise(r => setTimeout(r, 3000));
+                  const recheck5 = parseDetectionResult(await result.page.evaluate(getDetectionCheckScript()));
+                  if (!recheck5) { selfResolved = true; logger.info("intervention.auto-resolved", { sessionId, method: "cloudflare-checkbox-retry" }); domainKnowledge.recordChallengeResolution(urlDomain, "cloudflare-checkbox"); }
+                } catch { /* retry failed — continue */ }
+              }
             }
 
             // Record self-resolution in domain knowledge
@@ -789,6 +911,7 @@ server.registerTool(
                 sessionId, provider: solveResult.provider, timeMs: solveResult.solveTimeMs,
               });
               domainKnowledge.recordBlock(urlDomain, `captcha:auto-solved:${solveResult.provider}`);
+              domainKnowledge.recordChallengeResolution(urlDomain, solveResult.provider);
             } else {
               logger.warn("intervention.captcha-solve-failed", {
                 sessionId, error: solveResult.error,
@@ -801,11 +924,15 @@ server.registerTool(
             // Re-check one final time (challenge may have resolved during our attempts)
             intervention = parseDetectionResult(await result.page.evaluate(getDetectionCheckScript()));
             if (intervention) {
-              await result.page.evaluate(getOverlayScript(intervention.reason));
+              // Mark tab title as needing human — no overlay or chime
+              await result.page.evaluate((reason: string) => {
+                if (!document.title.startsWith('\u26a0\ufe0f')) {
+                  document.title = `\u26a0\ufe0f NEEDS HUMAN — ${reason} — ${document.title}`;
+                }
+              }, intervention.reason).catch(() => {});
               if (LEAP_HUD) {
                 await result.page.evaluate(getHUDUpdateScript("waiting")).catch(() => {});
               }
-              chime();
               notifyAlert("Leapfrog", `Human needed: ${intervention.reason}`);
               logger.info("intervention.detected", { sessionId, type: intervention.type, reason: intervention.reason });
             }
@@ -873,12 +1000,43 @@ server.registerTool(
       const session = requireSession(sessionId);
       const page = getPage(session);
 
+      // Load stable element suppress set from domain knowledge (self-improvement loop)
+      let suppressFingerprints: Set<string> | undefined;
+      if (session.domain) {
+        const stableFPs = domainKnowledge.getStableFingerprints(session.domain, 3);
+        if (stableFPs.length > 0) {
+          suppressFingerprints = new Set(stableFPs);
+        }
+        // Merge interaction heat map suppress set
+        const domainRecord = domainKnowledge.get(session.domain);
+        if (domainRecord) {
+          const heatSuppressSet = interactionTracker.getSuppressSet(session.domain, domainRecord.visitCount);
+          if (heatSuppressSet.size > 0) {
+            if (!suppressFingerprints) suppressFingerprints = new Set();
+            for (const fp of heatSuppressSet) suppressFingerprints.add(fp);
+          }
+        }
+      }
+
       // Take the snapshot
       const snapResult = await snapEngine.snapshot(page, session, {
         interactiveOnly: true,
         maxChars: maxChars ?? MAX_SNAPSHOT_CHARS,
         selector,
+        suppressFingerprints,
       });
+
+      // Record element fingerprints for stable element learning
+      if (session.domain && snapResult.fingerprints && snapResult.fingerprints.length > 0) {
+        domainKnowledge.recordElementFingerprints(session.domain, snapResult.fingerprints);
+      }
+
+      // Record element fingerprint→selector mappings for selector healing
+      if (session.domain && snapResult.elementMappings && snapResult.elementMappings.length > 0) {
+        for (const mapping of snapResult.elementMappings) {
+          domainKnowledge.recordElement(session.domain, mapping.fingerprint, mapping.selector);
+        }
+      }
 
       // Mark refs as fresh — they match the current nav generation
       session.refNavGeneration = session.navGeneration ?? 0;
@@ -887,7 +1045,14 @@ server.registerTool(
       let title = "";
       try { title = await page.title(); } catch { /* */ }
 
-      let output = `[${session.id}] ${title}\n${url}\n${snapResult.nodeCount} elements\n\n${snapResult.text}`;
+      let output = `[${session.id}] ${title}\n${url}\n${snapResult.nodeCount} elements`;
+
+      // Show suppression metrics when elements were suppressed
+      if (snapResult.elementsSuppressed && snapResult.elementsSuppressed > 0) {
+        output += ` (${snapResult.elementsSuppressed} suppressed, ~${snapResult.tokensSaved} tokens saved)`;
+      }
+
+      output += `\n\n${snapResult.text}`;
 
       // Incremental diff: compare with previous snapshot
       const diff = SnapshotDiffer.diff(session.id, url, snapResult);
@@ -1073,7 +1238,7 @@ server.registerTool(
         session.refNavGeneration = savedRefNavGen;
       }
 
-      // Resolve target to a Playwright locator (with stale-ref detection)
+      // Resolve target to a Playwright locator (with stale-ref detection + selector healing)
       const resolve = (ref: string) => {
         if (ref.startsWith("@e")) {
           // Generation-level guard: catches if navigate happened with no subsequent snapshot
@@ -1095,7 +1260,25 @@ server.registerTool(
             }
           }
           const selector = session.refMap.get(ref);
-          if (!selector) throw new Error(`Ref ${ref} not found. Take a fresh snapshot.`);
+          if (!selector) {
+            // Selector healing: try domain knowledge to find an alternative selector
+            if (session.domain && session.refFingerprints) {
+              const fingerprint = session.refFingerprints.get(ref);
+              if (fingerprint) {
+                const healedSelector = domainKnowledge.findElement(session.domain, fingerprint);
+                if (healedSelector) {
+                  logger.info("selector-healed", {
+                    ref,
+                    fingerprint,
+                    healedSelector,
+                    domain: session.domain,
+                  });
+                  return page.locator(healedSelector);
+                }
+              }
+            }
+            throw new Error(`Ref ${ref} not found. Take a fresh snapshot.`);
+          }
           return page.locator(selector);
         }
         return page.locator(ref); // CSS selectors don't go stale
@@ -1424,11 +1607,15 @@ server.registerTool(
                   logger.info("act.email-verification-detected", { sessionId });
                   // Don't show overlay for email verification — it's not a block, it's a step
                 } else {
-                  await page.evaluate(getOverlayScript(finalCheck.reason));
+                  // Mark tab title as needing human — no overlay or chime
+                  await page.evaluate((reason: string) => {
+                    if (!document.title.startsWith('\u26a0\ufe0f')) {
+                      document.title = `\u26a0\ufe0f NEEDS HUMAN — ${reason} — ${document.title}`;
+                    }
+                  }, finalCheck.reason).catch(() => {});
                   if (LEAP_HUD) {
                     await page.evaluate(getHUDUpdateScript("waiting")).catch(() => {});
                   }
-                  chime();
                   notifyAlert("Leapfrog", `Human needed: ${finalCheck.reason}`);
                 }
               }
@@ -1467,6 +1654,16 @@ server.registerTool(
       // P0-3: Record act tool call in session memory
       const actDuration = Date.now() - startTime;
       HarnessIntelligence.recordToolCall(sessionId, 'act', { action, target, value }, `${action}${target ? ` ${target}` : ''}`, actDuration);
+
+      // Interaction heat map: record element usage for future suppression
+      if (session.domain && target && session.refFingerprints) {
+        const fp = session.refFingerprints.get(target);
+        if (fp) {
+          const iType = (action === 'fill' || action === 'type') ? 'fill'
+            : (action === 'click' || action === 'dblclick') ? 'click' : undefined;
+          if (iType) interactionTracker.recordInteraction(session.domain, fp, iType);
+        }
+      }
 
       if (urlAfter !== urlBefore) {
         try { await page.waitForLoadState("load", { timeout: 5000 }); } catch { /* timeout ok */ }
@@ -1512,9 +1709,19 @@ server.registerTool(
       const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: "image/png" }> = [];
 
       if (savePath) {
-        await fs.mkdir(path.dirname(savePath), { recursive: true });
-        await fs.writeFile(savePath, imageBuffer);
-        content.push({ type: "text" as const, text: `Saved: ${savePath}` });
+        // Validate savePath: must be under home directory or CWD, must end in .png
+        const resolved = path.resolve(savePath);
+        const home = os.homedir();
+        const cwd = process.cwd();
+        if (!resolved.startsWith(home) && !resolved.startsWith(cwd)) {
+          throw new Error(`savePath must be under your home directory or CWD. Got: ${resolved}`);
+        }
+        if (!resolved.endsWith(".png")) {
+          throw new Error(`savePath must end in .png. Got: ${resolved}`);
+        }
+        await fs.mkdir(path.dirname(resolved), { recursive: true });
+        await fs.writeFile(resolved, imageBuffer);
+        content.push({ type: "text" as const, text: `Saved: ${resolved}` });
       }
 
       content.push({ type: "image" as const, data: imageBuffer.toString("base64"), mimeType: "image/png" as const });
@@ -1574,7 +1781,20 @@ server.registerTool(
             }
           }
           const sel = session.refMap.get(ref);
-          if (!sel) throw new Error(`Ref ${ref} not found.`);
+          if (!sel) {
+            // Selector healing fallback
+            if (session.domain && session.refFingerprints) {
+              const fingerprint = session.refFingerprints.get(ref);
+              if (fingerprint) {
+                const healedSelector = domainKnowledge.findElement(session.domain, fingerprint);
+                if (healedSelector) {
+                  logger.info("selector-healed", { ref, fingerprint, healedSelector, domain: session.domain });
+                  return page.locator(healedSelector);
+                }
+              }
+            }
+            throw new Error(`Ref ${ref} not found.`);
+          }
           return page.locator(sel);
         }
         return page.locator(ref); // CSS selectors don't go stale
@@ -1640,6 +1860,12 @@ server.registerTool(
       // P0-3: Record extract in session memory
       const duration = Date.now() - startTime;
       HarnessIntelligence.recordToolCall(sessionId, 'extract', { type, target }, `Extract ${type}: ${result.slice(0, 80)}`, duration);
+
+      // Interaction heat map: record extract on targeted elements
+      if (session.domain && target && session.refFingerprints) {
+        const fp = session.refFingerprints.get(target);
+        if (fp) interactionTracker.recordInteraction(session.domain, fp, 'extract');
+      }
 
       return ok(result || "(empty)");
     } catch (e: any) {
@@ -2064,7 +2290,20 @@ server.registerTool(
             }
           }
           const selector = session.refMap.get(ref);
-          if (!selector) throw new Error(`Ref ${ref} not found. Take a fresh snapshot.`);
+          if (!selector) {
+            // Selector healing fallback
+            if (session.domain && session.refFingerprints) {
+              const fingerprint = session.refFingerprints.get(ref);
+              if (fingerprint) {
+                const healedSelector = domainKnowledge.findElement(session.domain, fingerprint);
+                if (healedSelector) {
+                  logger.info("selector-healed", { ref, fingerprint, healedSelector, domain: session.domain });
+                  return page.locator(healedSelector);
+                }
+              }
+            }
+            throw new Error(`Ref ${ref} not found. Take a fresh snapshot.`);
+          }
           return page.locator(selector);
         }
         return page.locator(ref); // CSS selectors don't go stale
@@ -2167,8 +2406,9 @@ server.registerTool(
   {
     title: "Execute Script",
     description:
-      "Run a Playwright script in a sandboxed environment. One tool call replaces 5-20 sequential MCP round trips. " +
-      "Use for complex flows with conditional logic, loops, error handling.",
+      "Run a Playwright script with access to { page, context }. One tool call replaces 5-20 sequential MCP round trips. " +
+      "Use for complex flows with conditional logic, loops, error handling. " +
+      "NOTE: Scripts run in the Node.js process — equivalent to arbitrary code execution. Disable with LEAP_ALLOW_EXECUTE=false.",
     inputSchema: z.object({
       sessionId: z.string(),
       script: z
@@ -2593,20 +2833,31 @@ server.registerTool(
       const session = requireSession(sessionId);
       const page = getPage(session);
 
-      // Show @..@ overlay
-      await page.evaluate(getOverlayScript(reason));
+      // Mark tab as needing human — no overlay or chime
+      await page.evaluate((r: string) => {
+        if (!document.title.startsWith('\u26a0\ufe0f')) {
+          document.title = `\u26a0\ufe0f NEEDS HUMAN — ${r} — ${document.title}`;
+        }
+      }, reason).catch(() => {});
       if (LEAP_HUD) {
         await page.evaluate(getHUDUpdateScript("waiting")).catch(() => {});
       }
-      chime();
       notifyAlert("Leapfrog", `Human needed: ${reason}`);
 
-      // Poll until user clicks Done (check every 500ms, max 5 minutes)
+      // Poll until challenge/page resolves (check every 500ms, max 5 minutes)
       const timeout = 5 * 60 * 1000;
       const start = Date.now();
+      const initialUrl = page.url();
       while (Date.now() - start < timeout) {
+        // Check if the intervention condition has resolved
         const resolved = await page.evaluate(getResolutionCheckScript()).catch(() => false);
-        if (resolved) {
+        // Also check if the page URL changed (user navigated past the challenge)
+        const urlChanged = page.url() !== initialUrl;
+        if (resolved || urlChanged) {
+          // Restore tab title
+          await page.evaluate(() => {
+            document.title = document.title.replace(/^⚠️ NEEDS HUMAN — .* — /, '');
+          }).catch(() => {});
           if (LEAP_HUD) {
             await page.evaluate(getHUDUpdateScript("active")).catch(() => {});
           }
@@ -2615,8 +2866,10 @@ server.registerTool(
         await new Promise(r => setTimeout(r, 500));
       }
 
-      // Timeout — dismiss overlay
-      await page.evaluate(getDismissScript()).catch(() => {});
+      // Timeout — restore tab title
+      await page.evaluate(() => {
+        document.title = document.title.replace(/^⚠️ NEEDS HUMAN — .* — /, '');
+      }).catch(() => {});
       if (LEAP_HUD) {
         await page.evaluate(getHUDUpdateScript("active")).catch(() => {});
       }
@@ -2824,6 +3077,23 @@ server.registerTool(
         record.apiEndpoints.slice(0, 10).forEach(e => {
           lines.push(`  ${e.method} ${e.path} [${e.classification}]`);
         });
+      }
+
+      // Stable element intelligence
+      if (record.stableElements.length > 0) {
+        const stableCount = record.stableElements.length;
+        const suppressable = record.stableElements.filter(e => e.seenCount >= 3).length;
+        lines.push(`Stable elements learned: ${stableCount} (${suppressable} eligible for suppression)`);
+        // Show top 10 by seenCount
+        const top = [...record.stableElements]
+          .sort((a, b) => b.seenCount - a.seenCount)
+          .slice(0, 10);
+        for (const el of top) {
+          lines.push(`  ${el.fingerprint} (seen ${el.seenCount}x)`);
+        }
+        if (suppressable > 0) {
+          lines.push(`Estimated token savings: ~${suppressable * 30} tokens/visit`);
+        }
       }
       return ok(lines.join("\n"));
     } catch (e: any) {

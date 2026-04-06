@@ -6,7 +6,7 @@
 // This is the self-improvement foundation. Every navigation, block event,
 // consent dismissal, and API discovery feeds back into future visits.
 
-import { readFile, writeFile, mkdir, readdir, unlink } from 'fs/promises';
+import { readFile, writeFile, mkdir, readdir, unlink, rename } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
 import { logger } from './logger.js';
@@ -39,8 +39,22 @@ export interface DomainRecord {
   // Consent
   consentSelector: string | null;
 
-  // Snapshot intelligence
-  stableElements: string[];
+  // Challenge resolution intelligence
+  challengeResolution: {
+    method: string;       // "recaptcha-checkbox" | "cloudflare-checkbox" | "verify-button" | "capsolver" | "2captcha" | "nopecha"
+    successCount: number;
+    lastSuccess: number;
+  } | null;
+
+  // Snapshot intelligence — stable elements learned across visits
+  stableElements: Array<{
+    fingerprint: string;  // "role:name" e.g. "link:home"
+    seenCount: number;    // how many visits it appeared on
+    firstSeen: number;    // timestamp
+  }>;
+
+  /** Consecutive visits where a tracked fingerprint was absent. Reset on re-appearance. */
+  stableElementMisses?: Record<string, number>;
 
   // API intelligence
   apiEndpoints: Array<{
@@ -48,6 +62,13 @@ export interface DomainRecord {
     method: string;
     classification: string;
     lastSeen: number;
+  }>;
+
+  // Element memory — selector healing across sessions
+  elementMemory: Array<{
+    fingerprint: string;  // "role:name" e.g. "button:submit"
+    lastSelector: string; // last known CSS/role selector
+    lastSeen: number;     // timestamp
   }>;
 
   // Visit tracking
@@ -200,6 +221,32 @@ export class DomainKnowledge {
     this.dirty.add(key);
   }
 
+  /** Record a successful challenge resolution method for future visits. */
+  recordChallengeResolution(domain: string, method: string): void {
+    const key = normalizeDomain(domain);
+    let record = this.cache.get(key);
+    if (!record) {
+      record = this.createEmpty(key);
+      this.cache.set(key, record);
+    }
+
+    if (!record.challengeResolution || record.challengeResolution.method !== method) {
+      record.challengeResolution = { method, successCount: 1, lastSuccess: Date.now() };
+    } else {
+      record.challengeResolution.successCount++;
+      record.challengeResolution.lastSuccess = Date.now();
+    }
+
+    this.dirty.add(key);
+    logger.info('domain-knowledge:challenge-method-learned', { domain: key, method, count: record.challengeResolution.successCount });
+  }
+
+  /** Get the known-good challenge resolution method for a domain. */
+  getLearnedChallengeMethod(domain: string): string | null {
+    const record = this.cache.get(normalizeDomain(domain));
+    return record?.challengeResolution?.method ?? null;
+  }
+
   /** Record discovered API endpoints, merging with existing. */
   recordApiEndpoints(
     domain: string,
@@ -226,6 +273,129 @@ export class DomainKnowledge {
     }
 
     this.dirty.add(key);
+  }
+
+  /**
+   * Record element fingerprints from a snapshot visit.
+   * Increments seenCount for known fingerprints, adds new ones,
+   * and removes fingerprints not seen in 3+ consecutive visits.
+   */
+  recordElementFingerprints(domain: string, fingerprints: string[]): void {
+    const key = normalizeDomain(domain);
+    let record = this.cache.get(key);
+    if (!record) {
+      record = this.createEmpty(key);
+      this.cache.set(key, record);
+    }
+
+    const now = Date.now();
+    const fpSet = new Set(fingerprints);
+
+    // Initialize misses tracker if needed (backwards compat with old records)
+    if (!record.stableElementMisses) {
+      record.stableElementMisses = {};
+    }
+
+    // Update existing stable elements
+    for (const el of record.stableElements) {
+      if (fpSet.has(el.fingerprint)) {
+        el.seenCount++;
+        // Reset miss counter — it appeared
+        record.stableElementMisses[el.fingerprint] = 0;
+      } else {
+        // Increment miss counter
+        record.stableElementMisses[el.fingerprint] =
+          (record.stableElementMisses[el.fingerprint] ?? 0) + 1;
+      }
+    }
+
+    // Add new fingerprints not yet tracked
+    const tracked = new Set(record.stableElements.map(e => e.fingerprint));
+    for (const fp of fingerprints) {
+      if (!tracked.has(fp)) {
+        record.stableElements.push({
+          fingerprint: fp,
+          seenCount: 1,
+          firstSeen: now,
+        });
+      }
+    }
+
+    // Remove fingerprints not seen in 3+ consecutive visits (they're no longer stable)
+    record.stableElements = record.stableElements.filter(el => {
+      const misses = record!.stableElementMisses?.[el.fingerprint] ?? 0;
+      return misses < 3;
+    });
+
+    // Clean up miss tracker for removed entries
+    const remainingFPs = new Set(record.stableElements.map(e => e.fingerprint));
+    for (const fpKey of Object.keys(record.stableElementMisses)) {
+      if (!remainingFPs.has(fpKey)) {
+        delete record.stableElementMisses[fpKey];
+      }
+    }
+
+    this.dirty.add(key);
+  }
+
+  /**
+   * Get fingerprints of stable elements (seenCount >= minSeen) for suppression.
+   * Returns them sorted by seenCount descending (highest confidence first).
+   */
+  getStableFingerprints(domain: string, minSeen = 3): string[] {
+    const key = normalizeDomain(domain);
+    const record = this.cache.get(key);
+    if (!record) return [];
+
+    return record.stableElements
+      .filter(el => el.seenCount >= minSeen)
+      .sort((a, b) => b.seenCount - a.seenCount)
+      .map(el => el.fingerprint);
+  }
+
+  // ── Element Memory (selector healing) ─────────────────────────────────
+
+  private static readonly ELEMENT_MEMORY_CAP = 50;
+
+  /** Upsert an element fingerprint → selector mapping into domain memory. */
+  recordElement(domain: string, fingerprint: string, selector: string): void {
+    const key = normalizeDomain(domain);
+    let record = this.cache.get(key);
+    if (!record) {
+      record = this.createEmpty(key);
+      this.cache.set(key, record);
+    }
+
+    if (!record.elementMemory) {
+      record.elementMemory = [];
+    }
+
+    const now = Date.now();
+    const existing = record.elementMemory.find(e => e.fingerprint === fingerprint);
+    if (existing) {
+      existing.lastSelector = selector;
+      existing.lastSeen = now;
+    } else {
+      record.elementMemory.push({ fingerprint, lastSelector: selector, lastSeen: now });
+    }
+
+    // LRU cap: sort by lastSeen descending, keep only the newest entries
+    if (record.elementMemory.length > DomainKnowledge.ELEMENT_MEMORY_CAP) {
+      record.elementMemory.sort((a, b) => b.lastSeen - a.lastSeen);
+      record.elementMemory.length = DomainKnowledge.ELEMENT_MEMORY_CAP;
+    }
+
+    this.dirty.add(key);
+  }
+
+  /** Look up the last known selector for an element fingerprint on a domain. */
+  findElement(domain: string, fingerprint: string): string | undefined {
+    const key = normalizeDomain(domain);
+    const record = this.cache.get(key);
+    if (!record?.elementMemory) return undefined;
+
+    const entry = record.elementMemory.find(e => e.fingerprint === fingerprint);
+    return entry?.lastSelector;
   }
 
   // ── Persistence ───────────────────────────────────────────────────────
@@ -328,7 +498,9 @@ export class DomainKnowledge {
       waitStrategy: null,
       rateLimit: null,
       consentSelector: null,
+      challengeResolution: null,
       stableElements: [],
+      elementMemory: [],
       apiEndpoints: [],
       visitCount: 0,
       firstVisit: Date.now(),
@@ -356,8 +528,10 @@ export class DomainKnowledge {
     if (!record) return;
 
     const filePath = join(this.baseDir, domainToFilename(domain));
+    const tmpPath = filePath + '.tmp';
     try {
-      await writeFile(filePath, JSON.stringify(record, null, 2), 'utf-8');
+      await writeFile(tmpPath, JSON.stringify(record, null, 2), 'utf-8');
+      await rename(tmpPath, filePath);
     } catch (err) {
       logger.error('domain-knowledge:write-failed', {
         domain,
