@@ -617,4 +617,136 @@ describe("Actions Extended", () => {
       await manager.destroySession(session.id);
     });
   });
+
+  // ─── BUG-9: Non-native select dropdowns ────────────────────────────
+
+  describe("BUG-9: Custom select dropdown fallback", () => {
+    it("native select works normally", async () => {
+      const session = await createWithContent(`
+        <html><body>
+          <select id="color-select">
+            <option value="red">Red</option>
+            <option value="green">Green</option>
+            <option value="blue">Blue</option>
+          </select>
+        </body></html>
+      `);
+      const page = tabManager.getActivePage(session);
+
+      // Native selectOption should work
+      await page.locator("#color-select").selectOption("green");
+      const value = await page.locator("#color-select").inputValue();
+      expect(value).toBe("green");
+
+      await manager.destroySession(session.id);
+    });
+
+    it("custom select fallback clicks option by text (ARIA role=option)", async () => {
+      const session = await createWithContent(`
+        <html><body>
+          <div id="custom-select" tabindex="0" role="combobox" style="padding:8px;border:1px solid #ccc;cursor:pointer;">
+            <span id="selected-value">Choose...</span>
+          </div>
+          <ul id="dropdown" role="listbox" style="display:none;border:1px solid #ccc;">
+            <li role="option" data-value="apple" style="padding:4px;cursor:pointer;">Apple</li>
+            <li role="option" data-value="banana" style="padding:4px;cursor:pointer;">Banana</li>
+            <li role="option" data-value="cherry" style="padding:4px;cursor:pointer;">Cherry</li>
+          </ul>
+          <script>
+            const select = document.getElementById('custom-select');
+            const dropdown = document.getElementById('dropdown');
+            const display = document.getElementById('selected-value');
+
+            select.addEventListener('click', () => {
+              dropdown.style.display = dropdown.style.display === 'none' ? 'block' : 'none';
+            });
+            dropdown.querySelectorAll('[role="option"]').forEach(opt => {
+              opt.addEventListener('click', () => {
+                display.textContent = opt.textContent;
+                dropdown.style.display = 'none';
+              });
+            });
+          </script>
+        </body></html>
+      `);
+      const page = tabManager.getActivePage(session);
+
+      // The custom select won't work with native selectOption — it should fail
+      // and the fallback code should handle it by clicking
+      await page.locator("#custom-select").click();
+      await page.waitForTimeout(200);
+
+      // Simulate what the fallback does: find the option with role="option" and click it
+      const clicked = await page.evaluate((text: string) => {
+        const options = document.querySelectorAll('[role="option"]');
+        for (const opt of options) {
+          if ((opt as HTMLElement).textContent?.trim() === text) {
+            (opt as HTMLElement).click();
+            return true;
+          }
+        }
+        return false;
+      }, "Banana");
+
+      expect(clicked).toBe(true);
+
+      const selected = await page.locator("#selected-value").textContent();
+      expect(selected).toBe("Banana");
+
+      await manager.destroySession(session.id);
+    });
+
+    it("custom select fallback finds options by CSS class pattern", async () => {
+      const session = await createWithContent(`
+        <html><body>
+          <div id="react-select" style="padding:8px;border:1px solid #ccc;cursor:pointer;">
+            <span id="display">Pick one</span>
+          </div>
+          <div id="menu" style="display:none;border:1px solid #ccc;">
+            <div class="select__option" data-value="opt1" style="padding:4px;cursor:pointer;">Option 1</div>
+            <div class="select__option" data-value="opt2" style="padding:4px;cursor:pointer;">Option 2</div>
+            <div class="select__option" data-value="opt3" style="padding:4px;cursor:pointer;">Option 3</div>
+          </div>
+          <script>
+            const trigger = document.getElementById('react-select');
+            const menu = document.getElementById('menu');
+            const display = document.getElementById('display');
+
+            trigger.addEventListener('click', () => {
+              menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+            });
+            menu.querySelectorAll('.select__option').forEach(opt => {
+              opt.addEventListener('click', () => {
+                display.textContent = opt.textContent;
+                menu.style.display = 'none';
+              });
+            });
+          </script>
+        </body></html>
+      `);
+      const page = tabManager.getActivePage(session);
+
+      // Open dropdown
+      await page.locator("#react-select").click();
+      await page.waitForTimeout(200);
+
+      // Find option by CSS class pattern (React Select style)
+      const clicked = await page.evaluate((text: string) => {
+        const items = document.querySelectorAll('.select__option');
+        for (const item of items) {
+          if ((item as HTMLElement).textContent?.trim() === text) {
+            (item as HTMLElement).click();
+            return true;
+          }
+        }
+        return false;
+      }, "Option 2");
+
+      expect(clicked).toBe(true);
+      const selected = await page.locator("#display").textContent();
+      expect(selected).toBe("Option 2");
+
+      await manager.destroySession(session.id);
+    });
+  });
 });

@@ -1,40 +1,53 @@
 // ─── Anti-Bot Evasion ─────────────────────────────────────────────────────
 //
 // Stealth patches for headless Chromium to avoid bot detection.
-// Enabled by default. Disable with LEAP_STEALTH=false.
+// Three modes controlled by LEAP_STEALTH env var:
+//
+//   LEAP_STEALTH=true    (default) — full stealth: automation removal + identity faking
+//   LEAP_STEALTH=passive — passive only: remove automation signals, do NOT fake identity
+//   LEAP_STEALTH=false   — stealth completely disabled
+//
+// Passive mode was introduced because advanced fingerprinters (CreepJS) detect
+// INCONSISTENCIES from identity faking (fake plugins, WebGL, platform, etc.)
+// as "lies." A browser that simply removes automation signals without faking
+// identity scores 0% lies / 0% bot, versus 33% lies / 20% bot with full stealth.
 //
 // Standalone module — no cross-dependencies on logger or session-manager.
 //
 // ─── Evasion Index ────────────────────────────────────────────────────────
 //
-// P0 — Instant-kill vectors (detected by every fingerprint site)
-//   1. HeadlessChrome in Client Hints brands  → launch args + userAgentData override
+// Category A — Automation Signal Removal (PASSIVE + ACTIVE):
+//   These remove evidence that a browser is automated.
 //   2. navigator.webdriver = true              → init script, re-applied every navigation
-//   3. Custom UA disabling all stealth context → getContextOptions() fix
+//  14. sourceurl stripping (Playwright injects sourceURL comments)
+//  15. Runtime.enable CDP detection             → Error.prepareStackTrace filter
+//   -  Playwright globals cleanup (__pwInitScripts, __playwright, etc.)
+//   -  ChromeDriver property removal
+//   -  framenavigated webdriver re-deletion listener
 //
-// P1 — High-signal vectors (caught by CreepJS, fingerprint-pro)
-//   4. SwiftShader WebGL vendor/renderer       → launch args (--use-gl) + WebGL1/2 override
+// Category B — Identity Faking (ACTIVE ONLY):
+//   These create a fake identity. Advanced fingerprinters detect these as lies.
+//   1. HeadlessChrome in Client Hints brands  → userAgentData override
+//   4. SwiftShader WebGL vendor/renderer       → WebGL1/2 override
 //   5. Connection RTT = 0                      → navigator.connection override
-//   6. Alert auto-dismiss < 30ms               → getDialogDelay() helper (200-500ms)
-//  15. Runtime.enable CDP detection             → Error.prepareStackTrace filter (default ON, disable LEAP_CDP_STEALTH=false)
-//
-// P2 — Medium-signal vectors (caught by advanced fingerprinters)
 //   7. outerHeight === innerHeight             → fake chrome offset (85px)
 //   8. 0 mime types                            → MimeTypeArray spoof
 //   9. Platform mismatch with custom UA        → inferPlatformFromUA()
-//  16. Permissions.prototype.query incomplete   → comprehensive query override (20+ permissions)
-//
-// P3 — Low-signal vectors (anti-fingerprinting hardening)
-//  17. AudioContext fingerprint                 → getChannelData/getFloatFrequencyData noise
-//  18. WebRTC IP leak                           → ICE candidate filtering (local IPs suppressed)
-//  19. Font enumeration fingerprint             → document.fonts.check spoofing (standard font set)
-//
-// Additional puppeteer-stealth evasions:
 //  10. chrome.app emulation
-//  11. iframe contentWindow protection (patches propagate to child frames)
+//  11. iframe contentWindow protection
 //  12. media codecs spoofing (canPlayType override)
-//  13. document.hasFocus() override (returns false in headless)
-//  14. sourceurl stripping (Playwright injects sourceURL comments)
+//  13. document.hasFocus() override
+//  16. Permissions.prototype.query override
+//  17. AudioContext fingerprint noise
+//  18. WebRTC IP filtering
+//  19. Font enumeration spoofing
+//   -  navigator.plugins spoofing (5 fake plugins)
+//   -  navigator.languages override
+//   -  navigator.hardwareConcurrency/deviceMemory spoofing
+//   -  Notification.permission override
+//   -  Canvas fingerprint noise (session-seeded PRNG)
+//   -  chrome.runtime/loadTimes/csi emulation
+//   -  Worker/SharedWorker UA leak prevention
 //
 // Already passing (do not touch):
 //  - UA string looks like real Chrome 136
@@ -46,6 +59,8 @@
 
 import type { Page } from "playwright-core";
 import type { Fingerprint } from "./humanize-fingerprint.js";
+
+export type StealthModeType = 'off' | 'passive' | 'active';
 
 // ── rebrowser-patches integration note ────────────────────────────────────
 // rebrowser-patches (https://github.com/nicedoc/rebrowser-patches) patches
@@ -71,12 +86,14 @@ export class StealthMode {
   /**
    * Chromium launch args that reduce automation fingerprinting.
    *
-   * --disable-blink-features=AutomationControlled  → hides navigator.webdriver at engine level
-   * --use-gl=angle --use-angle=default              → use real GPU instead of SwiftShader (P1 #4)
-   * --disable-features=ChromeWhatsNewUI             → prevent headless Chrome feature leaks
+   * In passive mode, only automation-hiding args are included.
+   * In active mode, GPU-related args for WebGL faking are also added.
    */
   getLaunchArgs(): string[] {
-    return [
+    const mode = this.getMode();
+
+    // Category A args — remove automation signals (passive + active)
+    const args: string[] = [
       // P0 #2: Suppress navigator.webdriver at Blink level
       "--disable-blink-features=AutomationControlled",
 
@@ -84,16 +101,20 @@ export class StealthMode {
       // "HeadlessChrome" from appearing in Client Hints brands
       "--disable-features=AutomationControlled",
 
-      // P1 #4: Force real GPU rendering instead of SwiftShader
-      // SwiftShader shows "Google SwiftShader" in UNMASKED_VENDOR/RENDERER
-      "--use-gl=angle",
-      "--use-angle=default",
-
       // Standard headless-mode hardening
       "--disable-dev-shm-usage",
       "--no-first-run",
       "--no-default-browser-check",
     ];
+
+    // Category B args — GPU/identity faking (active only)
+    if (mode === 'active') {
+      // P1 #4: Force real GPU rendering instead of SwiftShader
+      // SwiftShader shows "Google SwiftShader" in UNMASKED_VENDOR/RENDERER
+      args.push("--use-gl=angle", "--use-angle=default");
+    }
+
+    return args;
   }
 
   /**
@@ -128,16 +149,6 @@ export class StealthMode {
   }
 
   /**
-   * JavaScript to inject via page.addInitScript() that patches
-   * common bot-detection vectors in the page's execution context.
-   *
-   * This script runs BEFORE page JavaScript on every navigation,
-   * including in iframes (Playwright propagates addInitScript to all frames).
-   *
-   * The `__LEAP_PLATFORM__` placeholder is replaced at apply-time with
-   * the correct platform for the active user-agent.
-   */
-  /**
    * Derive the correct navigator.platform string from process.platform.
    * Used as the fallback when no UA string is available to infer from.
    */
@@ -171,21 +182,23 @@ export class StealthMode {
     return Math.abs(hash);
   }
 
-  getInitScript(platform?: string, ua?: string, fingerprint?: Fingerprint, sessionSeed?: number): string {
-    const safePlatform = platform ?? this.getPlatformFromProcess();
-    const chromeVersion = ua
-      ? this.extractChromeMajorVersion(ua)
-      : this.extractChromeMajorVersion(this.getDefaultUserAgent());
+  // ────────────────────────────────────────────────────────────────────────
+  // Init Script — Split into Passive (Category A) and Active (Category B)
+  // ────────────────────────────────────────────────────────────────────────
 
-    // Phase 2.1/2.5: Use fingerprint values when available, otherwise defaults
-    const webglVendor = fingerprint?.webgl?.vendor ?? 'Google Inc. (Apple)';
-    const webglRenderer = fingerprint?.webgl?.renderer ?? 'ANGLE (Apple, Apple M1 Pro, OpenGL 4.1)';
-    const deviceMemory = fingerprint?.deviceMemory ?? 8;
-    const hardwareConcurrency = fingerprint?.hardwareConcurrency ?? 8;
-
-    // Phase 2.2/2.3: Session seed for deterministic PRNG (canvas + audio noise)
-    const seed = sessionSeed ?? this.hashSeed(ua ?? 'default-session');
-
+  /**
+   * Category A: Passive init script — removes automation signals only.
+   * These patches make an automated browser look like a non-automated browser
+   * WITHOUT faking its identity. Safe against advanced fingerprinters like CreepJS
+   * because they don't introduce detectable inconsistencies ("lies").
+   *
+   * Patches included:
+   * - Playwright globals cleanup (__pwInitScripts, __playwright, etc.)
+   * - navigator.webdriver deletion (P0 #2)
+   * - ChromeDriver property removal
+   * - sourceURL stripping (#14)
+   */
+  private getPassiveInitScript(): string {
     return `
       // ────────────────────────────────────────────────────────────────────
       // BUG FIX: __pwInitScripts race condition
@@ -210,6 +223,107 @@ export class StealthMode {
       })();
 
       // ────────────────────────────────────────────────────────────────────
+      // P0 #2: Hide navigator.webdriver
+      // BUG-004: Use delete + defineProperty + prototype patch for full coverage.
+      // Some detection scripts check the prototype directly or use 'in' operator.
+      // The --disable-blink-features=AutomationControlled launch arg should
+      // handle this, but QA found it does not always take effect. This
+      // redundant override ensures webdriver is hidden on every navigation.
+      // ────────────────────────────────────────────────────────────────────
+      try {
+        delete Object.getPrototypeOf(navigator).webdriver;
+        delete Navigator.prototype.webdriver;
+        delete navigator.webdriver;
+      } catch (e) { /* already deleted or non-configurable */ }
+      if ('webdriver' in navigator) {
+        try {
+          Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined,
+            configurable: true,
+            enumerable: false,
+          });
+        } catch (e) { /* best effort */ }
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      // Remove ChromeDriver detection property
+      // ────────────────────────────────────────────────────────────────────
+      delete window.cdc_adoQpoasnfa76pfcZLmcfl_;
+
+      // ────────────────────────────────────────────────────────────────────
+      // #14: sourceurl stripping
+      // Playwright injects //# sourceURL= comments into evaluated scripts.
+      // Detection sites look for these as automation fingerprints.
+      // We override Error.prepareStackTrace to strip sourceURL references.
+      // ────────────────────────────────────────────────────────────────────
+      (function() {
+        const origPrepareStackTrace = Error.prepareStackTrace;
+        Error.prepareStackTrace = function(error, callSites) {
+          if (origPrepareStackTrace) {
+            return origPrepareStackTrace(error, callSites);
+          }
+          const stack = callSites
+            .filter(site => {
+              const filename = site.getFileName() || '';
+              return !filename.startsWith('pptr:') &&
+                     !filename.includes('__playwright') &&
+                     !filename.includes('sourceURL');
+            })
+            .map(site => '    at ' + site.toString())
+            .join('\\n');
+          return error.toString() + '\\n' + stack;
+        };
+      })();
+    `;
+  }
+
+  /**
+   * Category B: Active init script — identity faking patches.
+   * These create a fake browser identity (plugins, WebGL, platform, etc.).
+   * Advanced fingerprinters like CreepJS can detect these as "lies" because
+   * they create inconsistencies between reported and actual values.
+   *
+   * Only applied when LEAP_STEALTH=true (active mode, the default).
+   *
+   * Patches included:
+   * - Session-seeded PRNG (mulberry32)
+   * - Client Hints brands override (P0 #1)
+   * - chrome.app/runtime/loadTimes/csi emulation (#10)
+   * - Permissions.prototype.query override (P2 #16)
+   * - navigator.plugins spoofing (5 fake plugins)
+   * - MimeTypeArray spoof (P2 #8)
+   * - navigator.languages override
+   * - navigator.platform override (P2 #9)
+   * - hardwareConcurrency/deviceMemory spoofing
+   * - Notification.permission override
+   * - WebGL vendor/renderer override (P1 #4)
+   * - Connection RTT override (P1 #5)
+   * - outerHeight/outerWidth fake (P2 #7)
+   * - document.hasFocus() override (#13)
+   * - Media codecs spoofing (#12)
+   * - Canvas fingerprint noise (Phase 2.2)
+   * - AudioContext fingerprint noise (P3 #17)
+   * - WebRTC IP filtering (P3 #18)
+   * - Font enumeration spoofing (P3 #19)
+   * - iframe contentWindow protection (#11)
+   * - Worker/SharedWorker UA leak prevention
+   */
+  private getActiveInitScript(platform: string, ua?: string, fingerprint?: Fingerprint, sessionSeed?: number): string {
+    const chromeVersion = ua
+      ? this.extractChromeMajorVersion(ua)
+      : this.extractChromeMajorVersion(this.getDefaultUserAgent());
+
+    // Phase 2.1/2.5: Use fingerprint values when available, otherwise defaults
+    const webglVendor = fingerprint?.webgl?.vendor ?? 'Google Inc. (Apple)';
+    const webglRenderer = fingerprint?.webgl?.renderer ?? 'ANGLE (Apple, Apple M1 Pro, OpenGL 4.1)';
+    const deviceMemory = fingerprint?.deviceMemory ?? 8;
+    const hardwareConcurrency = fingerprint?.hardwareConcurrency ?? 8;
+
+    // Phase 2.2/2.3: Session seed for deterministic PRNG (canvas + audio noise)
+    const seed = sessionSeed ?? this.hashSeed(ua ?? 'default-session');
+
+    return `
+      // ────────────────────────────────────────────────────────────────────
       // Phase 2.2/2.3: Session-seeded PRNG (mulberry32)
       // Deterministic within a session — same canvas/audio operations produce
       // identical output. Prevents tampering detection from non-deterministic noise.
@@ -223,40 +337,9 @@ export class StealthMode {
       }
 
       // ────────────────────────────────────────────────────────────────────
-      // P0 #2: Hide navigator.webdriver
-      // BUG-004: Use delete + defineProperty + prototype patch for full coverage.
-      // Some detection scripts check the prototype directly or use 'in' operator.
-      // The --disable-blink-features=AutomationControlled launch arg should
-      // handle this, but QA found it does not always take effect. This
-      // redundant override ensures webdriver is hidden on every navigation.
-      // ────────────────────────────────────────────────────────────────────
-      // P0 #2 fix: Delete webdriver entirely so BOTH checks pass:
-      //   typeof navigator.webdriver === "undefined"  (no value)
-      //   'webdriver' in navigator === false           (no property descriptor)
-      // Do NOT re-define with Object.defineProperty — that re-adds the
-      // property descriptor and fails the 'in' operator check.
-      try {
-        // Delete from prototype AND instance — both can hold the property
-        delete Object.getPrototypeOf(navigator).webdriver;
-        delete Navigator.prototype.webdriver;
-        delete navigator.webdriver; // instance-level descriptor added by Playwright
-      } catch (e) { /* already deleted or non-configurable */ }
-      // Fallback: if delete didn't fully work, override as last resort
-      if ('webdriver' in navigator) {
-        try {
-          Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined,
-            configurable: true,
-            enumerable: false,
-          });
-        } catch (e) { /* best effort */ }
-      }
-
-      // ────────────────────────────────────────────────────────────────────
       // P0 #1 + BUG-003 (consolidated): Client Hints brands override
       // Phase 2.6: Merged two overlapping patches into one clean replacement
-      // of the entire NavigatorUAData interface. The old BUG-003 patch only
-      // mutated existing brands; this replaces them entirely for full control.
+      // of the entire NavigatorUAData interface.
       // ────────────────────────────────────────────────────────────────────
       if (navigator.userAgentData) {
         const cleanBrands = [
@@ -273,13 +356,13 @@ export class StealthMode {
         const cleanUAData = {
           brands: cleanBrands,
           mobile: false,
-          platform: ${JSON.stringify(safePlatform.startsWith("Win") ? "Windows" : safePlatform.startsWith("Mac") ? "macOS" : safePlatform.startsWith("Linux") ? "Linux" : "macOS")},
+          platform: ${JSON.stringify(platform.startsWith("Win") ? "Windows" : platform.startsWith("Mac") ? "macOS" : platform.startsWith("Linux") ? "Linux" : "macOS")},
           getHighEntropyValues: function(hints) {
             return Promise.resolve({
               brands: cleanFullBrands,
               mobile: false,
               platform: this.platform,
-              platformVersion: ${JSON.stringify(safePlatform.startsWith("Win") ? "10.0.0" : safePlatform.startsWith("Mac") ? "15.0.0" : "6.6.0")},
+              platformVersion: ${JSON.stringify(platform.startsWith("Win") ? "10.0.0" : platform.startsWith("Mac") ? "15.0.0" : "6.6.0")},
               architecture: "x86",
               bitness: "64",
               model: "",
@@ -389,7 +472,6 @@ export class StealthMode {
       // Bot detection scripts query various permissions and check for
       // unexpected throws or inconsistent states. Real browsers return
       // "prompt" for most permissions and "granted" for geolocation.
-      // This replaces the old notifications-only patch with full coverage.
       // Defends against: CreepJS permissions fingerprint, FingerprintJS Pro
       // ────────────────────────────────────────────────────────────────────
       (function() {
@@ -413,7 +495,7 @@ export class StealthMode {
       })();
 
       // ────────────────────────────────────────────────────────────────────
-      // Fix navigator.plugins (already passing — 5 fake plugins)
+      // Fix navigator.plugins (5 fake plugins)
       // ────────────────────────────────────────────────────────────────────
       Object.defineProperty(navigator, 'plugins', {
         get: () => {
@@ -480,7 +562,7 @@ export class StealthMode {
       });
 
       // ────────────────────────────────────────────────────────────────────
-      // Fix navigator.languages (already passing)
+      // Fix navigator.languages
       // ────────────────────────────────────────────────────────────────────
       Object.defineProperty(navigator, 'languages', {
         get: () => ['en-US', 'en'],
@@ -492,7 +574,7 @@ export class StealthMode {
       // Prevents mismatch when custom UA says Windows but platform says MacIntel.
       // ────────────────────────────────────────────────────────────────────
       Object.defineProperty(navigator, 'platform', {
-        get: () => ${JSON.stringify(safePlatform)},
+        get: () => ${JSON.stringify(platform)},
         configurable: true,
       });
 
@@ -513,7 +595,7 @@ export class StealthMode {
       });
 
       // ────────────────────────────────────────────────────────────────────
-      // Notification.permission returns 'default' (already passing)
+      // Notification.permission returns 'default'
       // ────────────────────────────────────────────────────────────────────
       Object.defineProperty(Notification, 'permission', {
         get: () => 'default',
@@ -521,19 +603,9 @@ export class StealthMode {
       });
 
       // ────────────────────────────────────────────────────────────────────
-      // Remove ChromeDriver detection property (already passing)
-      // ────────────────────────────────────────────────────────────────────
-      delete window.cdc_adoQpoasnfa76pfcZLmcfl_;
-
-      // ────────────────────────────────────────────────────────────────────
       // P1 #4: WebGL vendor/renderer override (SwiftShader → real GPU)
-      // Headless Chromium uses SwiftShader which reports:
-      //   UNMASKED_VENDOR  = "Google Inc. (Google)"
-      //   UNMASKED_RENDERER = "ANGLE (Google, Google SwiftShader, OpenGL ES)"
-      // Real Chrome on macOS reports ANGLE with the actual GPU.
-      // We override getParameter for both WebGL1 and WebGL2 contexts.
-      // ────────────────────────────────────────────────────────────────────
       // Phase 2.1: WebGL vendor/renderer from per-session fingerprint (9 GPU models)
+      // ────────────────────────────────────────────────────────────────────
       (function() {
         const WEBGL_VENDOR = ${JSON.stringify(webglVendor)};
         const WEBGL_RENDERER = ${JSON.stringify(webglRenderer)};
@@ -550,11 +622,9 @@ export class StealthMode {
           };
         }
 
-        // Patch WebGL1
         if (typeof WebGLRenderingContext !== 'undefined') {
           patchWebGLContext(WebGLRenderingContext.prototype);
         }
-        // Patch WebGL2
         if (typeof WebGL2RenderingContext !== 'undefined') {
           patchWebGLContext(WebGL2RenderingContext.prototype);
         }
@@ -562,8 +632,6 @@ export class StealthMode {
 
       // ────────────────────────────────────────────────────────────────────
       // P1 #5: Connection RTT = 0 → override navigator.connection
-      // Headless Chromium reports RTT of 0 and downlink of 0, which is
-      // impossible for a real network connection.
       // ────────────────────────────────────────────────────────────────────
       if (navigator.connection) {
         const connectionOverrides = {
@@ -586,12 +654,10 @@ export class StealthMode {
 
       // ────────────────────────────────────────────────────────────────────
       // P2 #7: outerHeight === innerHeight → headless has no chrome
-      // Real browsers have ~85px of chrome (toolbar, tab bar, etc).
-      // outerWidth is also slightly larger in real browsers.
       // ────────────────────────────────────────────────────────────────────
       (function() {
         const chromeHeight = 85;
-        const chromeWidth = 0; // outerWidth usually matches on macOS
+        const chromeWidth = 0;
 
         Object.defineProperty(window, 'outerHeight', {
           get: () => window.innerHeight + chromeHeight,
@@ -605,8 +671,6 @@ export class StealthMode {
 
       // ────────────────────────────────────────────────────────────────────
       // #13: document.hasFocus() override
-      // Returns false in headless — real browsers always return true
-      // when the page is in the foreground.
       // ────────────────────────────────────────────────────────────────────
       Document.prototype.hasFocus = function() {
         return true;
@@ -614,8 +678,6 @@ export class StealthMode {
 
       // ────────────────────────────────────────────────────────────────────
       // #12: Media codecs spoofing (canPlayType override)
-      // Headless may report different codec support. Ensure common codecs
-      // return 'probably' or 'maybe' as real Chrome does.
       // ────────────────────────────────────────────────────────────────────
       (function() {
         const codecResponses = {
@@ -641,9 +703,6 @@ export class StealthMode {
 
       // ────────────────────────────────────────────────────────────────────
       // Phase 2.2: Canvas fingerprint noise — session-seeded PRNG
-      // Uses __leapRandom() so toDataURL() returns identical output for the
-      // same canvas content within a session. Non-deterministic noise (Math.random)
-      // was a tampering detection signal — two calls gave different hashes.
       // ────────────────────────────────────────────────────────────────────
       const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
       HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
@@ -652,7 +711,6 @@ export class StealthMode {
           try {
             const imageData = ctx.getImageData(0, 0, Math.min(this.width, 16), Math.min(this.height, 16));
             const data = imageData.data;
-            // Reset PRNG to a content-derived position so same canvas = same noise
             var canvasSeed = ${seed} >>> 0;
             for (var ci = 0; ci < Math.min(data.length, 32); ci++) { canvasSeed = (canvasSeed + data[ci]) | 0; }
             function canvasRandom() {
@@ -661,9 +719,8 @@ export class StealthMode {
               t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
               return ((t ^ t >>> 14) >>> 0) / 4294967296;
             }
-            // Perturb a few pixels by +/- 1 in deterministic channels
             for (let i = 0; i < Math.min(data.length, 64); i += 16) {
-              const channel = i + Math.floor(canvasRandom() * 3); // R, G, or B
+              const channel = i + Math.floor(canvasRandom() * 3);
               const delta = canvasRandom() > 0.5 ? 1 : -1;
               data[channel] = Math.max(0, Math.min(255, data[channel] + delta));
             }
@@ -676,17 +733,9 @@ export class StealthMode {
       };
 
       // ────────────────────────────────────────────────────────────────────
-      // P3: AudioContext fingerprint noise
-      // Bot detection scripts (CreepJS, FingerprintJS) create small
-      // AudioContext buffers and hash the output to uniquely identify
-      // a browser. By adding imperceptible noise to getChannelData and
-      // getFloatFrequencyData, the hash changes on every call, breaking
-      // the fingerprint without affecting audio playback.
-      // Defends against: CreepJS audioContext fingerprint, FingerprintJS Pro
+      // P3: AudioContext fingerprint noise — session-seeded PRNG
       // ────────────────────────────────────────────────────────────────────
-      // Phase 2.3: AudioContext noise — session-seeded PRNG
       (function() {
-        // Local seeded PRNG for audio noise — deterministic per session
         var audioSeed = ${seed} >>> 0;
         function audioRandom() {
           audioSeed |= 0; audioSeed = audioSeed + 0x6D2B79F5 | 0;
@@ -698,24 +747,20 @@ export class StealthMode {
         const originalGetChannelData = AudioBuffer.prototype.getChannelData;
         AudioBuffer.prototype.getChannelData = function(channel) {
           const data = originalGetChannelData.call(this, channel);
-          // Only modify if this looks like a fingerprint attempt (small buffer, specific sample rate)
           if (this.length < 4096 && this.sampleRate === 44100) {
-            // Reset audio PRNG to channel-derived position for determinism
             audioSeed = (${seed} + channel * 7919) >>> 0;
             for (let i = 0; i < data.length; i++) {
-              // Extremely subtle noise — +/-0.0001 range, undetectable by ear
               data[i] += (audioRandom() * 0.0002 - 0.0001);
             }
           }
           return data;
         };
 
-        // Also override AnalyserNode.getFloatFrequencyData
         if (typeof AnalyserNode !== 'undefined') {
           const originalGetFloat = AnalyserNode.prototype.getFloatFrequencyData;
           AnalyserNode.prototype.getFloatFrequencyData = function(array) {
             originalGetFloat.call(this, array);
-            audioSeed = ${seed} >>> 0; // Reset for determinism
+            audioSeed = ${seed} >>> 0;
             for (let i = 0; i < array.length; i++) {
               array[i] += (audioRandom() * 0.1 - 0.05);
             }
@@ -725,17 +770,11 @@ export class StealthMode {
 
       // ────────────────────────────────────────────────────────────────────
       // P3: WebRTC leak prevention
-      // WebRTC can leak real local/internal IP addresses (10.x, 192.168.x,
-      // 172.16-31.x) through ICE candidates, even when behind a proxy or
-      // VPN. This patch filters out local IP candidates from icecandidate
-      // events and clears iceServers when none are configured.
-      // Defends against: WebRTC IP leak tests, browserleaks.com/webrtc
       // ────────────────────────────────────────────────────────────────────
       (function() {
         const originalRTC = window.RTCPeerConnection;
         if (originalRTC) {
           window.RTCPeerConnection = function(config, constraints) {
-            // Force through TURN server only if configured, otherwise block local candidates
             if (config && config.iceServers) {
               // Allow configured TURN servers
             } else {
@@ -743,15 +782,13 @@ export class StealthMode {
               config.iceServers = [];
             }
             const pc = new originalRTC(config, constraints);
-            // Override addEventListener to filter local/internal IP candidates
             const originalAddEvent = pc.addEventListener.bind(pc);
             pc.addEventListener = function(type, listener, options) {
               if (type === 'icecandidate') {
                 const wrappedListener = function(event) {
                   if (event.candidate && event.candidate.candidate) {
-                    // Filter out local IP candidates (10.x, 172.16-31.x, 192.168.x)
                     if (/((10\\.)|(172\\.(1[6-9]|2\\d|3[01])\\.)|(192\\.168\\.))/.test(event.candidate.candidate)) {
-                      return; // Suppress local IP leak
+                      return;
                     }
                   }
                   listener.call(this, event);
@@ -763,7 +800,6 @@ export class StealthMode {
             return pc;
           };
           window.RTCPeerConnection.prototype = originalRTC.prototype;
-          // Preserve static methods and prototype chain
           Object.keys(originalRTC).forEach(function(key) {
             window.RTCPeerConnection[key] = originalRTC[key];
           });
@@ -772,26 +808,16 @@ export class StealthMode {
 
       // ────────────────────────────────────────────────────────────────────
       // P3: Font enumeration spoofing
-      // Detection scripts use document.fonts.check() to test hundreds of
-      // font names and build a unique installed-fonts fingerprint. This
-      // patch returns consistent results: true for a standard set of
-      // web-safe fonts, and a deterministic hash-based result for others,
-      // ensuring the fingerprint is identical across sessions.
-      // Defends against: CreepJS fonts fingerprint, Browserless font detection
       // ────────────────────────────────────────────────────────────────────
       (function() {
         var standardFonts = ['Arial', 'Arial Black', 'Comic Sans MS', 'Courier New', 'Georgia', 'Impact', 'Times New Roman', 'Trebuchet MS', 'Verdana', 'Lucida Console', 'Tahoma', 'Palatino Linotype'];
         if (document.fonts && document.fonts.check) {
           var originalCheck = document.fonts.check.bind(document.fonts);
           document.fonts.check = function(font, text) {
-            // Extract the font family name from the CSS font shorthand
             var fontName = font.replace(/[\\d.]+px\\s*/, '').replace(/["']/g, '').trim();
-            // Always return true for standard web-safe fonts
             if (standardFonts.some(function(f) { return fontName.toLowerCase().includes(f.toLowerCase()); })) {
               return true;
             }
-            // For non-standard fonts, use a deterministic hash for consistency
-            // This ensures the same font always returns the same result
             var hash = 0;
             for (var i = 0; i < fontName.length; i++) {
               hash = ((hash << 5) - hash + fontName.charCodeAt(i)) | 0;
@@ -803,13 +829,8 @@ export class StealthMode {
 
       // ────────────────────────────────────────────────────────────────────
       // #11: iframe contentWindow protection
-      // Ensure that stealth patches propagate properly to iframes.
-      // Detection sites create iframes and check if navigator.webdriver
-      // is present in the child context.
-      // We intercept contentWindow access and ensure our patches apply.
       // ────────────────────────────────────────────────────────────────────
       (function() {
-        // Proxy contentWindow to patch newly created iframes
         const origHTMLIFrameElement = Object.getOwnPropertyDescriptor(
           HTMLIFrameElement.prototype, 'contentWindow'
         );
@@ -819,7 +840,6 @@ export class StealthMode {
               const win = origHTMLIFrameElement.get.call(this);
               if (win) {
                 try {
-                  // Patch webdriver in iframe context — delete first, fallback to override
                   if ('webdriver' in win.navigator) {
                     delete Object.getPrototypeOf(win.navigator).webdriver;
                   }
@@ -835,31 +855,96 @@ export class StealthMode {
       })();
 
       // ────────────────────────────────────────────────────────────────────
-      // #14: sourceurl stripping
-      // Playwright injects //# sourceURL= comments into evaluated scripts.
-      // Detection sites look for these as automation fingerprints.
-      // We override Error.prepareStackTrace to strip sourceURL references.
+      // BUG-3: Worker/SharedWorker UA leak prevention
       // ────────────────────────────────────────────────────────────────────
       (function() {
-        const origPrepareStackTrace = Error.prepareStackTrace;
-        Error.prepareStackTrace = function(error, callSites) {
-          if (origPrepareStackTrace) {
-            return origPrepareStackTrace(error, callSites);
-          }
-          // Filter out Playwright-injected sourceURL frames
-          const stack = callSites
-            .filter(site => {
-              const filename = site.getFileName() || '';
-              return !filename.startsWith('pptr:') &&
-                     !filename.includes('__playwright') &&
-                     !filename.includes('sourceURL');
-            })
-            .map(site => '    at ' + site.toString())
-            .join('\\n');
-          return error.toString() + '\\n' + stack;
-        };
+        var targetPlatform = ${JSON.stringify(platform)};
+
+        function buildWorkerPreamble() {
+          return 'Object.defineProperty(self.navigator, "webdriver", { get: function() { return undefined; }, configurable: true, enumerable: false });' +
+            'try { Object.defineProperty(self.navigator, "platform", { get: function() { return "' + targetPlatform + '"; }, configurable: true }); } catch(e) {}';
+        }
+
+        if (typeof Worker !== 'undefined') {
+          var OriginalWorker = Worker;
+          var preamble = buildWorkerPreamble();
+          window.Worker = function(scriptURL, options) {
+            var url = String(scriptURL);
+            var isModule = options && options.type === 'module';
+            if (!isModule && !url.startsWith('blob:')) {
+              try {
+                var wrapperCode = preamble + ';importScripts("' + url.replace(/"/g, '\\\\"') + '");';
+                var blob = new Blob([wrapperCode], { type: 'application/javascript' });
+                var blobURL = URL.createObjectURL(blob);
+                var worker = new OriginalWorker(blobURL, options);
+                URL.revokeObjectURL(blobURL);
+                return worker;
+              } catch(e) {
+                // Fall through to original constructor on any error
+              }
+            }
+            return new OriginalWorker(scriptURL, options);
+          };
+          window.Worker.prototype = OriginalWorker.prototype;
+          try {
+            Object.defineProperty(window.Worker, 'length', { value: OriginalWorker.length });
+            Object.defineProperty(window.Worker, 'name', { value: 'Worker' });
+          } catch(e) {}
+        }
+
+        if (typeof SharedWorker !== 'undefined') {
+          var OriginalSharedWorker = SharedWorker;
+          var sharedPreamble = buildWorkerPreamble();
+          window.SharedWorker = function(scriptURL, options) {
+            var url = String(scriptURL);
+            var nameOrOpts = options;
+            var isModule = nameOrOpts && typeof nameOrOpts === 'object' && nameOrOpts.type === 'module';
+            if (!isModule && !url.startsWith('blob:')) {
+              try {
+                var wrapperCode = sharedPreamble + ';importScripts("' + url.replace(/"/g, '\\\\"') + '");';
+                var blob = new Blob([wrapperCode], { type: 'application/javascript' });
+                var blobURL = URL.createObjectURL(blob);
+                var worker = new OriginalSharedWorker(blobURL, nameOrOpts);
+                URL.revokeObjectURL(blobURL);
+                return worker;
+              } catch(e) {}
+            }
+            return new OriginalSharedWorker(scriptURL, nameOrOpts);
+          };
+          window.SharedWorker.prototype = OriginalSharedWorker.prototype;
+          try {
+            Object.defineProperty(window.SharedWorker, 'length', { value: OriginalSharedWorker.length });
+            Object.defineProperty(window.SharedWorker, 'name', { value: 'SharedWorker' });
+          } catch(e) {}
+        }
       })();
     `;
+  }
+
+  /**
+   * JavaScript to inject via page.addInitScript() that patches
+   * common bot-detection vectors in the page's execution context.
+   *
+   * This script runs BEFORE page JavaScript on every navigation,
+   * including in iframes (Playwright propagates addInitScript to all frames).
+   *
+   * In passive mode, only Category A (automation signal removal) patches are applied.
+   * In active mode, both Category A and Category B (identity faking) patches are applied.
+   */
+  getInitScript(platform?: string, ua?: string, fingerprint?: Fingerprint, sessionSeed?: number, modeOverride?: StealthModeType): string {
+    const mode = modeOverride ?? this.getMode();
+    if (mode === 'off') return '';
+
+    // Passive patches always included (both passive and active modes)
+    let script = this.getPassiveInitScript();
+
+    // Active patches only in active mode
+    if (mode === 'active') {
+      const safePlatform = platform ?? this.getPlatformFromProcess();
+      script += '\n' + this.getActiveInitScript(safePlatform, ua, fingerprint, sessionSeed);
+    }
+
+    return script;
   }
 
   /**
@@ -910,14 +995,10 @@ export class StealthMode {
     return `
       // ────────────────────────────────────────────────────────────────────
       // P1: Runtime.enable CDP detection bypass (default ON, LEAP_CDP_STEALTH=false to disable)
-      // Intercept Error.prepareStackTrace to hide Playwright's stack frames
-      // from bot detection scripts that inspect the call stack for automation
-      // artifacts like __playwright eval contexts or DevTools protocol frames.
       // ────────────────────────────────────────────────────────────────────
       (function() {
         const originalPrepareStackTrace = Error.prepareStackTrace;
         Error.prepareStackTrace = function(error, stack) {
-          // Filter out any stack frames from __playwright, pptr, or DevTools
           const filtered = stack.filter(function(frame) {
             const fileName = frame.getFileName() || '';
             return !fileName.includes('__playwright') &&
@@ -948,17 +1029,19 @@ export class StealthMode {
    * Apply the stealth init script to a Playwright page.
    * Call this immediately after page creation, before navigating.
    *
-   * Accepts an optional userAgent to infer the correct platform value
-   * for navigator.platform (prevents P2 #9 mismatch).
+   * Respects the current stealth mode:
+   * - passive: applies only Category A patches (automation signal removal)
+   * - active:  applies Category A + Category B (identity faking)
    *
    * Also applies:
    * - Playwright globals cleanup (__pwInitScripts, __playwright__binding__, __playwright)
    * - CDP stealth script (default ON, disable via LEAP_CDP_STEALTH=false)
    */
-  async applyToPage(page: Page, userAgent?: string, fingerprint?: Fingerprint): Promise<void> {
+  async applyToPage(page: Page, userAgent?: string, fingerprint?: Fingerprint, modeOverride?: StealthModeType): Promise<void> {
+    const mode = modeOverride ?? this.getMode();
+    if (mode === 'off') return;
+
     // BUG-1 fix: Always infer platform from the UA string that the browser is actually using.
-    // When no custom UA is provided, stealth sets the default Mac UA via getContextOptions(),
-    // so we must infer from that — not from the host OS (which would say Win32 on Windows).
     const effectiveUA = userAgent ?? this.getDefaultUserAgent();
     const platform = this.inferPlatformFromUA(effectiveUA);
 
@@ -969,7 +1052,7 @@ export class StealthMode {
 
     // Sanitize sourceURL comments from all init scripts before injection (Phase 1.3)
     await page.addInitScript(this.sanitizeSourceURL(
-      this.getInitScript(platform, userAgent, fingerprint, sessionSeed)
+      this.getInitScript(platform, userAgent, fingerprint, sessionSeed, mode)
     ));
 
     // Remove trivially detectable Playwright globals that leak automation context
@@ -978,6 +1061,7 @@ export class StealthMode {
     ));
 
     // P1: CDP stealth (default ON, disable via LEAP_CDP_STEALTH=false)
+    // CDP stealth is Category A (automation signal removal) — applied in both modes
     if (this.isCdpStealthEnabled()) {
       await page.addInitScript(this.sanitizeSourceURL(
         this.getCdpStealthScript()
@@ -987,6 +1071,7 @@ export class StealthMode {
     // P0 #2 post-navigation fix: Playwright re-adds navigator.webdriver AFTER
     // init scripts run. This listener deletes it after every frame load so both
     // `typeof navigator.webdriver === "undefined"` AND `'webdriver' in navigator === false`.
+    // This is Category A — applied in both passive and active modes.
     page.on("framenavigated", async (frame) => {
       try {
         await frame.evaluate(() => {
@@ -1001,29 +1086,49 @@ export class StealthMode {
   }
 
   /**
-   * Whether stealth mode is enabled.
-   * Returns true unless LEAP_STEALTH=false is set.
+   * Get the current stealth mode.
+   *   'active'  — full stealth (automation removal + identity faking). Default.
+   *   'passive' — remove automation signals only, no identity faking.
+   *   'off'     — stealth completely disabled.
    */
-  isEnabled(): boolean {
-    return process.env.LEAP_STEALTH !== "false";
+  getMode(): StealthModeType {
+    const val = process.env.LEAP_STEALTH?.toLowerCase();
+    if (val === 'false' || val === 'off') return 'off';
+    if (val === 'passive') return 'passive';
+    if (val === 'auto') return 'active'; // auto mode: base is active, bandit overrides per-navigation
+    return 'active'; // default — backwards compatible (true, unset, or any other value)
   }
 
   /**
-   * BrowserContext options to merge into context creation.
-   * Returns stealth-appropriate defaults (user agent, locale, timezone, headers).
+   * Whether the stealth mode is bandit-driven (LEAP_STEALTH=auto).
+   * When true, the EXP3 bandit selects the stealth mode per-domain
+   * per-navigation instead of using a fixed mode.
    *
-   * BUG-005 / P0 #3 FIX: When a custom user agent is provided, we still return
-   * locale/timezone/extraHTTPHeaders — only the userAgent field is omitted.
-   * Previously, ANY custom UA caused this method to return {} which
-   * disabled all stealth context options.
+   * When LEAP_STEALTH is unset or explicitly set to true/passive/false,
+   * the user's choice takes precedence and the bandit is advisory only
+   * (it still records outcomes for learning, but doesn't override the mode).
    */
+  isBanditMode(): boolean {
+    const val = process.env.LEAP_STEALTH?.toLowerCase();
+    return val === 'auto';
+  }
+
+  /**
+   * Whether stealth mode is enabled (passive or active).
+   * Returns true unless LEAP_STEALTH=false/off is set.
+   * Backwards compatible — callers that only need to know "is stealth on at all?"
+   * can keep using this method.
+   */
+  isEnabled(): boolean {
+    return this.getMode() !== 'off';
+  }
+
   /**
    * Build Sec-CH-UA header value from a Chrome version and platform.
    * Phase 2.4: These HTTP headers are sent BEFORE JS runs, so they must
    * be set via extraHTTPHeaders to stay in sync with the JS-side override.
    */
   buildSecChUaHeaders(chromeVersion: number, platform: string): Record<string, string> {
-    // Map platform string to Sec-CH-UA-Platform value
     let chPlatform = "macOS";
     if (platform.startsWith("Win")) chPlatform = "Windows";
     else if (platform.startsWith("Linux")) chPlatform = "Linux";
@@ -1035,11 +1140,36 @@ export class StealthMode {
     };
   }
 
+  /**
+   * BrowserContext options to merge into context creation.
+   * Returns stealth-appropriate defaults (user agent, locale, timezone, headers).
+   *
+   * In passive mode, returns minimal options (locale/timezone for consistency)
+   * but does NOT set a faked userAgent or Sec-CH-UA headers.
+   *
+   * In active mode, returns the full set including faked UA and headers.
+   *
+   * BUG-005 / P0 #3 FIX: When a custom user agent is provided, we still return
+   * locale/timezone/extraHTTPHeaders — only the userAgent field is omitted.
+   */
   getContextOptions(customUserAgent?: string, fingerprint?: Fingerprint): Record<string, unknown> {
-    if (!this.isEnabled()) {
+    const mode = this.getMode();
+    if (mode === 'off') {
       return {};
     }
 
+    // Passive mode: minimal context options — no identity faking
+    if (mode === 'passive') {
+      return {
+        locale: "en-US",
+        timezoneId: "America/New_York",
+        extraHTTPHeaders: {
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+      };
+    }
+
+    // Active mode: full stealth context options
     const ua = customUserAgent ?? this.getDefaultUserAgent();
     const chromeVersion = this.extractChromeMajorVersion(ua);
     const platform = this.inferPlatformFromUA(ua);

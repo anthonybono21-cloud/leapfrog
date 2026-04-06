@@ -9,6 +9,7 @@
 //   0 = baseline, 1 = cookies+UA, 2 = fingerprint spoofing, 3 = full stealth
 
 import { logger } from './logger.js';
+import type { StealthModeType } from './stealth.js';
 
 // ─── Strategy Definitions ────────────────────────────────────────────────
 
@@ -20,6 +21,39 @@ const STRATEGIES = [
 ] as const;
 
 export type StealthStrategy = (typeof STRATEGIES)[number];
+
+// ─── Arm → Stealth Mode Mapping ─────────────────────────────────────────
+//
+// Maps bandit arm indices to the stealth mode that gets applied per-page.
+//
+//   Arm 0: baseline         → 'off'     — raw Playwright, no stealth patches
+//   Arm 1: tier1-cookies    → 'passive' — remove automation signals only
+//   Arm 2: tier2-fingerprint → 'active' — full fingerprint spoofing
+//   Arm 3: tier3-full-stealth → 'active' — full stealth + extra measures
+//
+// Key insight: passive mode is the sweet spot for most sites. Active
+// fingerprint spoofing is counterproductive on advanced fingerprinters
+// (CreepJS detects the faked identity as "lies"). The bandit should
+// naturally converge on passive (arm 1) for most sites.
+
+export function armToStealthMode(armIndex: number): StealthModeType {
+  switch (armIndex) {
+    case 0: return 'off';       // baseline — no stealth at all
+    case 1: return 'passive';   // tier1 — remove automation signals only
+    case 2: return 'active';    // tier2 — full fingerprint spoofing
+    case 3: return 'active';    // tier3 — full stealth (same mode, extra measures elsewhere)
+    default: return 'passive';  // safe fallback
+  }
+}
+
+/**
+ * Whether the given arm index implies extra behavioral measures
+ * beyond the stealth mode (rate limiting, human-like delays).
+ * Only tier3-full-stealth (arm 3) triggers these extras.
+ */
+export function armRequiresExtraMeasures(armIndex: number): boolean {
+  return armIndex === 3;
+}
 
 // ─── EXP3 Bandit ─────────────────────────────────────────────────────────
 

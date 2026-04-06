@@ -43,6 +43,10 @@ export interface AdaptiveNavigateOptions {
   autoRetry?: boolean;
   /** Max escalation level (0-5). Default: 3 */
   maxRetryLevel?: number;
+  /** Stealth mode override from bandit selection. Applied per-page via stealth.applyToPage(). */
+  stealthModeOverride?: 'off' | 'passive' | 'active';
+  /** Bandit arm index for this navigation (passed through for outcome tracking). */
+  banditArmIndex?: number;
 }
 
 export type PageQuality = "GOOD" | "EMPTY" | "TIMEOUT" | "BLOCKED";
@@ -62,6 +66,10 @@ export interface AdaptiveNavigateResult {
   finalStrategy: WaitStrategy;
   /** Escalation metadata if stealth retries were used */
   escalation?: EscalationMeta;
+  /** Bandit arm index used for this navigation (for outcome tracking) */
+  banditArmIndex?: number;
+  /** Stealth mode override applied by the bandit */
+  stealthModeOverride?: string;
   /** The session that owns the page (may change if session was rotated) */
   session: Session;
   /** The page instance (may change if session was rotated) */
@@ -723,6 +731,10 @@ export async function adaptiveNavigate(
   const waitUntil = options?.waitUntil ?? "load";
   const autoRetry = options?.autoRetry ?? true;
   const maxRetryLevel = options?.maxRetryLevel ?? 3;
+  const banditMeta = {
+    banditArmIndex: options?.banditArmIndex,
+    stealthModeOverride: options?.stealthModeOverride,
+  };
 
   // Phase 1: Adaptive wait strategy selection
   const waitResult = await navigateWithAdaptiveWait(
@@ -752,6 +764,7 @@ export async function adaptiveNavigate(
       title,
       quality: waitResult.quality,
       finalStrategy: waitResult.finalStrategy,
+      ...banditMeta,
       session,
       page,
     };
@@ -775,6 +788,7 @@ export async function adaptiveNavigate(
       title,
       quality: "BLOCKED",
       finalStrategy: waitResult.finalStrategy,
+      ...banditMeta,
       session,
       page,
     };
@@ -819,6 +833,7 @@ export async function adaptiveNavigate(
       quality: escalationResult.quality,
       finalStrategy: escalationResult.finalStrategy,
       escalation: escalationResult.escalation,
+      ...banditMeta,
       session: resultSession,
       page: resultPage,
     };
@@ -842,6 +857,7 @@ export async function adaptiveNavigate(
     title,
     quality: "BLOCKED",
     finalStrategy: waitResult.finalStrategy,
+    ...banditMeta,
     session,
     page,
   };
@@ -894,6 +910,11 @@ export function formatAdaptiveResult(result: AdaptiveNavigateResult): string {
   // Wait strategy info (if not the default)
   if (result.finalStrategy !== "load") {
     parts.push(`[wait: ${result.finalStrategy}]`);
+  }
+
+  // Bandit strategy info (if bandit mode is active)
+  if (result.stealthModeOverride !== undefined) {
+    parts.push(`[stealth: ${result.stealthModeOverride} (bandit arm ${result.banditArmIndex})]`);
   }
 
   return parts.join("\n");

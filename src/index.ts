@@ -40,7 +40,8 @@ import { solveCaptcha, isCaptchaSolverEnabled } from "./captcha-solver.js";
 import { domainKnowledge, normalizeDomain } from "./domain-knowledge.js";
 import type { NavigationHints } from "./domain-knowledge.js";
 import { TilesCoordinator } from "./tiles-coordinator.js";
-import { strategyManager } from "./stealth-bandit.js";
+import { strategyManager, armToStealthMode, armRequiresExtraMeasures } from "./stealth-bandit.js";
+import { stealth } from "./stealth.js";
 import { interactionTracker } from "./interaction-tracker.js";
 
 const require = createRequire(import.meta.url);
@@ -226,6 +227,11 @@ async function snapAndFormat(session: Session, opts?: { selector?: string; maxCh
   const url = page.url();
   let title = "";
   try { title = await page.title(); } catch { /* */ }
+
+  // BUG-11 fix: Update diff baseline whenever snapAndFormat produces a snapshot.
+  // This ensures that after act() navigates and calls snapAndFormat(), the diff
+  // baseline reflects the post-navigation state instead of stale pre-action state.
+  SnapshotDiffer.diff(session.id, url, result);
 
   let output = `[${session.id}] ${title}\n${url}\n${result.nodeCount} elements`;
   if (result.elementsSuppressed && result.elementsSuppressed > 0) {
@@ -676,14 +682,36 @@ server.registerTool(
         effectiveMaxRetryLevel = Math.max(maxRetryLevel, hints.stealthTier + 1);
       }
 
-      // EXP3 bandit: select stealth strategy for this domain
+      // ── EXP3 Bandit: closed-loop stealth strategy selection ──────────
+      // 1. Restore bandit state from domain knowledge (warm start)
+      if (hints.hasBanditState) {
+        const savedBandit = domainKnowledge.getBanditState(urlDomain);
+        if (savedBandit) {
+          strategyManager.fromJSON(urlDomain, savedBandit);
+        }
+      }
+
+      // 2. Select strategy — the bandit picks an arm based on learned weights
       const banditSelection = strategyManager.selectStrategy(urlDomain);
+
+      // 3. Map arm to stealth mode — only override when LEAP_STEALTH=auto
+      //    (user-explicit modes like true/passive/false always take precedence)
+      const banditStealthMode = armToStealthMode(banditSelection.armIndex);
+      const useBanditMode = stealth.isBanditMode();
+
+      // 4. Apply bandit-selected stealth mode to page before navigation
+      //    Only when bandit mode is active and the mode differs from session default
+      if (useBanditMode && banditStealthMode !== 'off') {
+        await stealth.applyToPage(page, undefined, undefined, banditStealthMode);
+      }
 
       // Adaptive navigate with wait strategy selection + stealth escalation
       const result = await adaptiveNavigate(page, session, url, sessions, {
         waitUntil: effectiveWaitUntil,
         autoRetry,
         maxRetryLevel: effectiveMaxRetryLevel,
+        stealthModeOverride: useBanditMode ? banditStealthMode : undefined,
+        banditArmIndex: banditSelection.armIndex,
       });
 
       // P0-2: Post-navigation SSRF check — catch 302 redirects to internal IPs
@@ -736,8 +764,20 @@ server.registerTool(
         domainKnowledge.recordBlock(urlDomain, reason);
       }
 
-      // EXP3 bandit: record outcome (success=1 if not blocked, 0 if blocked)
+      // EXP3 bandit: record outcome and persist state (closes the feedback loop)
       strategyManager.recordOutcome(urlDomain, banditSelection.armIndex, !wasBlocked);
+
+      // Persist bandit state into domain knowledge for cross-session learning
+      const banditState = strategyManager.toJSON(urlDomain);
+      if (banditState) {
+        domainKnowledge.saveBanditState(urlDomain, banditState);
+      }
+
+      // Update domain knowledge stealth tier to match bandit's selection
+      // This keeps the legacy stealthTier field in sync with the bandit
+      if (!wasBlocked) {
+        domainKnowledge.update(urlDomain, { stealthTier: banditSelection.armIndex });
+      }
 
       // Auto-dismiss known consent selector from domain knowledge
       if (hints.consentSelector) {
@@ -1458,7 +1498,69 @@ server.registerTool(
         case "select": {
           if (!target || value === undefined) return err("'select' requires target and value");
           await thinkPause.beforeAction("click");
-          await resolve(target).selectOption(value);
+          // BUG-9: Support non-native (custom) select dropdowns.
+          // Try native selectOption first; if it fails because the element
+          // is not a <select>, fall back to click-to-open + find option + click.
+          try {
+            await resolve(target).selectOption(value, { timeout: 3000 });
+          } catch (selectErr: any) {
+            // Native select failed — likely a custom dropdown (React Select, MUI, etc.)
+            logger.debug("act.select-fallback", { target, value, reason: selectErr.message });
+            const loc = resolve(target);
+            // Step 1: Click the custom select to open the dropdown
+            await loc.click();
+            // Step 2: Wait briefly for options to render
+            await page.waitForTimeout(500);
+            // Step 3: Find the option by text content and click it
+            // Look for listbox/menu roles first, then fall back to common patterns
+            const optionClicked = await page.evaluate((optionText: string) => {
+              // Strategy 1: ARIA listbox/menu items
+              const listboxOptions = document.querySelectorAll(
+                '[role="option"], [role="menuitem"], [role="listbox"] li, [role="menu"] li'
+              );
+              for (const opt of listboxOptions) {
+                const text = (opt as HTMLElement).textContent?.trim() ?? '';
+                if (text === optionText || text.toLowerCase() === optionText.toLowerCase()) {
+                  (opt as HTMLElement).click();
+                  return true;
+                }
+              }
+              // Strategy 2: Common custom select patterns (divs/spans in dropdown containers)
+              const dropdownSelectors = [
+                '.select__option', '.MuiMenuItem-root', '.vs__dropdown-option',
+                '.ant-select-item', '.choices__item', '[class*="option"]',
+                'ul[class*="menu"] li', 'ul[class*="list"] li', 'div[class*="menu"] div[class*="option"]'
+              ];
+              for (const sel of dropdownSelectors) {
+                const items = document.querySelectorAll(sel);
+                for (const item of items) {
+                  const text = (item as HTMLElement).textContent?.trim() ?? '';
+                  if (text === optionText || text.toLowerCase() === optionText.toLowerCase()) {
+                    (item as HTMLElement).click();
+                    return true;
+                  }
+                }
+              }
+              // Strategy 3: Broad search — any visible element matching the text
+              const allElements = document.querySelectorAll('li, div[role], span[role]');
+              for (const el of allElements) {
+                if ((el as HTMLElement).offsetParent === null) continue; // skip hidden
+                const text = (el as HTMLElement).textContent?.trim() ?? '';
+                if (text === optionText) {
+                  (el as HTMLElement).click();
+                  return true;
+                }
+              }
+              return false;
+            }, value);
+            if (!optionClicked) {
+              throw new Error(
+                `Could not find option "${value}" in custom select dropdown. ` +
+                `The dropdown opened but no matching option was found. ` +
+                `Try using 'click' on the specific option element instead.`
+              );
+            }
+          }
           break;
         }
         case "press": {
@@ -1657,6 +1759,8 @@ server.registerTool(
       const urlAfter = page.url();
 
       // Harness Intelligence: analyze post-action state
+      // BUG-11: Also update diff baseline so the next snapshot/diff only shows
+      // changes that happened AFTER the action, not changes from the action itself.
       let harnessOutput = "";
       try {
         const postSnap = await snapEngine.snapshot(page, session, { interactiveOnly: true, maxChars: MAX_SNAPSHOT_CHARS });
@@ -1667,6 +1771,10 @@ server.registerTool(
         if (harnessState.outcome !== "SUCCESS" || harnessState.loopWarning || harnessState.stuckWarning) {
           harnessOutput = "\n\n" + formatHarnessOutput(harnessState);
         }
+        // BUG-11 fix: Update the diff baseline with the post-action snapshot.
+        // Without this, the next `snapshot` or `diff` call would diff against
+        // the pre-action state, making the diff noisy with already-seen changes.
+        SnapshotDiffer.diff(session.id, urlAfter, postSnap);
       } catch { /* harness analysis is best-effort */ }
 
       // P0-3: Record act tool call in session memory
@@ -3217,7 +3325,7 @@ async function runDoctor(): Promise<void> {
   console.log(`  LEAP_HEADLESS       = ${process.env.LEAP_HEADLESS ?? "(default: true)"}`);
   console.log(`  LEAP_CHANNEL        = ${process.env.LEAP_CHANNEL ?? "(default: bundled chromium)"}`);
   console.log(`  LEAP_ALLOW_JS       = ${process.env.LEAP_ALLOW_JS ?? "(default: true)"}`);
-  console.log(`  LEAP_STEALTH        = ${process.env.LEAP_STEALTH ?? "(default: true)"}`);
+  console.log(`  LEAP_STEALTH        = ${process.env.LEAP_STEALTH ?? "(default: true — options: true|passive|false|auto)"}`);
   console.log(`  LEAP_HUMANIZE       = ${process.env.LEAP_HUMANIZE ?? "(default: false)"}`);
   console.log(`  LEAP_LOG_LEVEL      = ${process.env.LEAP_LOG_LEVEL ?? "(default: info)"}`);
   console.log(`  LEAP_HEADED         = ${process.env.LEAP_HEADED ?? "(default: false)"}`);
@@ -3245,6 +3353,7 @@ Usage: npx leapfrog [options]
 Options:
   --doctor         Run diagnostics and verify installation
   --stealth-audit  Run stealth self-test (bot detection checks)
+    --mode=MODE      off|passive|active|compare (default: active)
     --local-only     Tier 1 only (~2s, no external sites)
     --full           Include Tier 3 extended checks (~45s)
     --json           Output structured JSON
@@ -3255,7 +3364,7 @@ Options:
 Environment Variables:
   LEAP_MAX_SESSIONS    Max concurrent sessions (default: 15)
   LEAP_HEADLESS        Run headless (default: true)
-  LEAP_STEALTH         Enable stealth mode (default: true)
+  LEAP_STEALTH         Stealth mode: true|passive|false|auto (default: true). auto enables per-domain EXP3 bandit selection.
   LEAP_HUMANIZE        Enable humanization (default: false)
   LEAP_IDLE_TIMEOUT    Session idle timeout in ms (default: 1800000)
   LEAP_LOG_LEVEL       Log level: debug|info|warn|error (default: info)
@@ -3315,11 +3424,19 @@ async function main() {
   }
 
   if (args.includes("--stealth-audit")) {
+    const modeArg = args.find(a => a.startsWith("--mode="));
+    const modeValue = modeArg ? modeArg.split("=")[1] : undefined;
+    const validModes = ["off", "passive", "active", "compare"];
+    const mode = modeValue && validModes.includes(modeValue)
+      ? (modeValue as "off" | "passive" | "active" | "compare")
+      : undefined;
+
     await runStealthAudit({
       localOnly: args.includes("--local-only"),
       full: args.includes("--full"),
       json: args.includes("--json"),
       headed: args.includes("--headed"),
+      mode,
     });
     return;
   }

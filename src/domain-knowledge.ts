@@ -71,6 +71,10 @@ export interface DomainRecord {
     lastSeen: number;     // timestamp
   }>;
 
+  // EXP3 bandit state — persisted so the bandit warm-starts across sessions.
+  // If present, restored into StrategyManager on domain load.
+  banditState?: { weights: number[]; gamma: number; numArms: number };
+
   // Visit tracking
   visitCount: number;
   firstVisit: number;
@@ -83,6 +87,8 @@ export interface NavigationHints {
   waitUntil?: string;
   stealthTier?: number;
   consentSelector?: string | null;
+  /** Whether the domain has a persisted bandit state to restore. */
+  hasBanditState?: boolean;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -485,7 +491,31 @@ export class DomainKnowledge {
       hints.consentSelector = record.consentSelector;
     }
 
+    // Bandit state: signal presence so caller can restore it
+    if (record.banditState) {
+      hints.hasBanditState = true;
+    }
+
     return hints;
+  }
+
+  /** Persist bandit state into a domain record and mark dirty. */
+  saveBanditState(domain: string, state: { weights: number[]; gamma: number; numArms: number }): void {
+    const key = normalizeDomain(domain);
+    let record = this.cache.get(key);
+    if (!record) {
+      record = this.createEmpty(key);
+      this.cache.set(key, record);
+    }
+    record.banditState = state;
+    this.dirty.add(key);
+  }
+
+  /** Get the persisted bandit state for a domain (from cache). */
+  getBanditState(domain: string): { weights: number[]; gamma: number; numArms: number } | undefined {
+    const key = normalizeDomain(domain);
+    const record = this.cache.get(key);
+    return record?.banditState ?? undefined;
   }
 
   // ── Internal ──────────────────────────────────────────────────────────

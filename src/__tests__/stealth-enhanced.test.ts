@@ -28,7 +28,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { SessionManager } from "../session-manager.js";
-import { StealthMode, stealth } from "../stealth.js";
+import { StealthMode, stealth, type StealthModeType } from "../stealth.js";
 import { tabManager } from "../tab-manager.js";
 
 describe("Stealth Enhanced — Real Page Evaluation", () => {
@@ -94,6 +94,330 @@ describe("Stealth Enhanced — Real Page Evaluation", () => {
       expect(script.length).toBeGreaterThan(100);
       expect(script).toContain("navigator");
       expect(script).toContain("webdriver");
+    });
+  });
+
+  // ── Three-mode system tests ────────────────────────────────────────
+
+  describe("getMode() three-mode system", () => {
+    function withEnv(value: string | undefined, fn: () => void) {
+      const original = process.env.LEAP_STEALTH;
+      if (value === undefined) {
+        delete process.env.LEAP_STEALTH;
+      } else {
+        process.env.LEAP_STEALTH = value;
+      }
+      try {
+        fn();
+      } finally {
+        if (original !== undefined) {
+          process.env.LEAP_STEALTH = original;
+        } else {
+          delete process.env.LEAP_STEALTH;
+        }
+      }
+    }
+
+    it("returns 'active' when LEAP_STEALTH is unset (default)", () => {
+      withEnv(undefined, () => {
+        const instance = new StealthMode();
+        expect(instance.getMode()).toBe('active');
+      });
+    });
+
+    it("returns 'active' when LEAP_STEALTH=true", () => {
+      withEnv("true", () => {
+        const instance = new StealthMode();
+        expect(instance.getMode()).toBe('active');
+      });
+    });
+
+    it("returns 'passive' when LEAP_STEALTH=passive", () => {
+      withEnv("passive", () => {
+        const instance = new StealthMode();
+        expect(instance.getMode()).toBe('passive');
+      });
+    });
+
+    it("returns 'passive' when LEAP_STEALTH=Passive (case insensitive)", () => {
+      withEnv("Passive", () => {
+        const instance = new StealthMode();
+        expect(instance.getMode()).toBe('passive');
+      });
+    });
+
+    it("returns 'off' when LEAP_STEALTH=false", () => {
+      withEnv("false", () => {
+        const instance = new StealthMode();
+        expect(instance.getMode()).toBe('off');
+      });
+    });
+
+    it("returns 'off' when LEAP_STEALTH=off", () => {
+      withEnv("off", () => {
+        const instance = new StealthMode();
+        expect(instance.getMode()).toBe('off');
+      });
+    });
+
+    it("isEnabled() returns true for 'active'", () => {
+      withEnv("true", () => {
+        const instance = new StealthMode();
+        expect(instance.isEnabled()).toBe(true);
+      });
+    });
+
+    it("isEnabled() returns true for 'passive'", () => {
+      withEnv("passive", () => {
+        const instance = new StealthMode();
+        expect(instance.isEnabled()).toBe(true);
+      });
+    });
+
+    it("isEnabled() returns false for 'off'", () => {
+      withEnv("false", () => {
+        const instance = new StealthMode();
+        expect(instance.isEnabled()).toBe(false);
+      });
+    });
+  });
+
+  describe("Passive mode init script content", () => {
+    it("passive mode includes webdriver deletion", () => {
+      const instance = new StealthMode();
+      const script = instance.getInitScript(undefined, undefined, undefined, undefined, 'passive');
+      expect(script).toContain("webdriver");
+      expect(script).toContain("__pwInitScripts");
+      expect(script).toContain("__playwright");
+    });
+
+    it("passive mode does NOT include identity faking patches", () => {
+      const instance = new StealthMode();
+      const script = instance.getInitScript(undefined, undefined, undefined, undefined, 'passive');
+      // Should NOT contain active-only patches
+      expect(script).not.toContain("navigator.plugins");
+      expect(script).not.toContain("MimeTypeArray");
+      expect(script).not.toContain("UNMASKED_VENDOR_WEBGL");
+      expect(script).not.toContain("userAgentData");
+      expect(script).not.toContain("__leapSeed");
+      expect(script).not.toContain("canPlayType");
+      expect(script).not.toContain("RTCPeerConnection");
+      expect(script).not.toContain("AudioBuffer");
+    });
+
+    it("active mode includes ALL patches (passive + active)", () => {
+      const instance = new StealthMode();
+      const script = instance.getInitScript(undefined, undefined, undefined, undefined, 'active');
+      // Category A (passive) patches
+      expect(script).toContain("webdriver");
+      expect(script).toContain("__pwInitScripts");
+      // Category B (active) patches
+      expect(script).toContain("userAgentData");
+      expect(script).toContain("UNMASKED_VENDOR_WEBGL");
+      expect(script).toContain("__leapSeed");
+      expect(script).toContain("RTCPeerConnection");
+      expect(script).toContain("AudioBuffer");
+    });
+
+    it("off mode returns empty string", () => {
+      const instance = new StealthMode();
+      const script = instance.getInitScript(undefined, undefined, undefined, undefined, 'off');
+      expect(script).toBe('');
+    });
+  });
+
+  describe("Passive mode launch args", () => {
+    function withEnv(value: string, fn: () => void) {
+      const original = process.env.LEAP_STEALTH;
+      process.env.LEAP_STEALTH = value;
+      try {
+        fn();
+      } finally {
+        if (original !== undefined) {
+          process.env.LEAP_STEALTH = original;
+        } else {
+          delete process.env.LEAP_STEALTH;
+        }
+      }
+    }
+
+    it("passive mode includes automation-hiding args", () => {
+      withEnv("passive", () => {
+        const instance = new StealthMode();
+        const args = instance.getLaunchArgs();
+        expect(args).toContain("--disable-blink-features=AutomationControlled");
+        expect(args).toContain("--disable-features=AutomationControlled");
+        expect(args).toContain("--no-first-run");
+      });
+    });
+
+    it("passive mode does NOT include GPU args", () => {
+      withEnv("passive", () => {
+        const instance = new StealthMode();
+        const args = instance.getLaunchArgs();
+        expect(args).not.toContain("--use-gl=angle");
+        expect(args).not.toContain("--use-angle=default");
+      });
+    });
+
+    it("active mode includes GPU args", () => {
+      withEnv("true", () => {
+        const instance = new StealthMode();
+        const args = instance.getLaunchArgs();
+        expect(args).toContain("--use-gl=angle");
+        expect(args).toContain("--use-angle=default");
+      });
+    });
+  });
+
+  describe("Passive mode context options", () => {
+    function withEnv(value: string, fn: () => void) {
+      const original = process.env.LEAP_STEALTH;
+      process.env.LEAP_STEALTH = value;
+      try {
+        fn();
+      } finally {
+        if (original !== undefined) {
+          process.env.LEAP_STEALTH = original;
+        } else {
+          delete process.env.LEAP_STEALTH;
+        }
+      }
+    }
+
+    it("passive mode returns locale/timezone but NOT faked UA", () => {
+      withEnv("passive", () => {
+        const instance = new StealthMode();
+        const opts = instance.getContextOptions();
+        expect(opts.locale).toBe("en-US");
+        expect(opts.timezoneId).toBe("America/New_York");
+        expect(opts.userAgent).toBeUndefined();
+        // No Sec-CH-UA headers in passive mode
+        const headers = opts.extraHTTPHeaders as Record<string, string>;
+        expect(headers["Accept-Language"]).toBe("en-US,en;q=0.9");
+        expect(headers["Sec-CH-UA"]).toBeUndefined();
+      });
+    });
+
+    it("active mode returns faked UA and Sec-CH-UA headers", () => {
+      withEnv("true", () => {
+        const instance = new StealthMode();
+        const opts = instance.getContextOptions();
+        expect(opts.userAgent).toContain("Chrome/");
+        expect(opts.locale).toBe("en-US");
+        const headers = opts.extraHTTPHeaders as Record<string, string>;
+        expect(headers["Sec-CH-UA"]).toBeDefined();
+      });
+    });
+  });
+
+  describe("Passive mode in-page evaluation", () => {
+    it("passive mode: webdriver is hidden", async () => {
+      const session = await manager.createSession({ stealth: true });
+      const page = tabManager.getActivePage(session);
+
+      // Apply passive mode manually to test isolation
+      await stealth.applyToPage(page, undefined, undefined, 'passive');
+      await page.goto("about:blank");
+
+      const value = await page.evaluate(() => navigator.webdriver);
+      expect(value).toBeUndefined();
+
+      await manager.destroySession(session.id);
+    });
+
+    it("passive mode: __playwright globals are cleaned up", async () => {
+      const session = await manager.createSession({ stealth: true });
+      const page = tabManager.getActivePage(session);
+
+      await stealth.applyToPage(page, undefined, undefined, 'passive');
+      await page.goto("about:blank");
+
+      const globals = await page.evaluate(() => ({
+        pw: typeof (window as any).__pwInitScripts,
+        binding: typeof (window as any).__playwright__binding__,
+        playwright: typeof (window as any).__playwright,
+      }));
+
+      expect(globals.pw).toBe("undefined");
+      expect(globals.binding).toBe("undefined");
+      expect(globals.playwright).toBe("undefined");
+
+      await manager.destroySession(session.id);
+    });
+
+    it("passive mode: plugins are NOT spoofed (real browser values)", async () => {
+      const session = await manager.createSession({ stealth: false });
+      const page = tabManager.getActivePage(session);
+
+      // Apply only passive stealth
+      await stealth.applyToPage(page, undefined, undefined, 'passive');
+      await page.goto("about:blank");
+
+      const pluginCount = await page.evaluate(() => navigator.plugins.length);
+      // In passive mode, we should NOT have 5 fake plugins
+      // The real headless browser has 0 plugins or browser default
+      expect(pluginCount).not.toBe(5);
+
+      await manager.destroySession(session.id);
+    });
+
+    it("passive mode: platform is NOT overridden", async () => {
+      const session = await manager.createSession({ stealth: false });
+      const page = tabManager.getActivePage(session);
+
+      // Apply only passive stealth
+      await stealth.applyToPage(page, undefined, undefined, 'passive');
+      await page.goto("about:blank");
+
+      const platform = await page.evaluate(() => navigator.platform);
+      // In passive mode, platform should be the real browser value, not spoofed
+      // The real value in headless Chromium on macOS is "MacIntel", on Linux is "Linux x86_64"
+      // We just verify the active override hasn't been applied by checking it's truthy
+      expect(platform).toBeTruthy();
+      // The key test is that the passive init script doesn't contain navigator.platform overrides
+      const instance = new StealthMode();
+      const passiveScript = instance.getInitScript(undefined, undefined, undefined, undefined, 'passive');
+      expect(passiveScript).not.toContain("Object.defineProperty(navigator, 'platform'");
+
+      await manager.destroySession(session.id);
+    });
+  });
+
+  // ── Active mode regression tests (ensure backwards compat) ────────
+
+  describe("Active mode regression", () => {
+    it("active mode: webdriver is hidden", async () => {
+      const session = await manager.createSession();
+      const page = tabManager.getActivePage(session);
+      await page.goto("about:blank");
+
+      const value = await page.evaluate(() => navigator.webdriver);
+      expect(value).toBeUndefined();
+
+      await manager.destroySession(session.id);
+    });
+
+    it("active mode: plugins are spoofed (5 fake)", async () => {
+      const session = await manager.createSession();
+      const page = tabManager.getActivePage(session);
+      await page.goto("about:blank");
+
+      const pluginCount = await page.evaluate(() => navigator.plugins.length);
+      expect(pluginCount).toBe(5);
+
+      await manager.destroySession(session.id);
+    });
+
+    it("active mode: platform is overridden", async () => {
+      const session = await manager.createSession();
+      const page = tabManager.getActivePage(session);
+      await page.goto("about:blank");
+
+      const platform = await page.evaluate(() => navigator.platform);
+      expect(platform).toBe("MacIntel");
+
+      await manager.destroySession(session.id);
     });
   });
 
@@ -785,6 +1109,79 @@ describe("Stealth Enhanced — Real Page Evaluation", () => {
       } else {
         delete process.env.LEAP_CDP_STEALTH;
       }
+    });
+  });
+
+  // ── BUG-3: Worker UA Leak Prevention ──────────────────────────────
+
+  describe("BUG-3: Worker constructor interception", () => {
+    it("Worker constructor is wrapped (not the original)", async () => {
+      const session = await manager.createSession();
+      const page = tabManager.getActivePage(session);
+      await page.goto("about:blank");
+
+      // The Worker constructor should be replaced by our wrapper.
+      // We can detect this by checking that it's not native code.
+      const isWrapped = await page.evaluate(() => {
+        // Our wrapper doesn't have [native code] in toString
+        const str = Worker.toString();
+        return !str.includes("[native code]");
+      });
+
+      expect(isWrapped).toBe(true);
+      await manager.destroySession(session.id);
+    });
+
+    it("Worker.prototype is preserved from original", async () => {
+      const session = await manager.createSession();
+      const page = tabManager.getActivePage(session);
+      await page.goto("about:blank");
+
+      const hasPrototype = await page.evaluate(() => {
+        return typeof Worker.prototype === "object" && Worker.prototype !== null;
+      });
+
+      expect(hasPrototype).toBe(true);
+      await manager.destroySession(session.id);
+    });
+
+    it("Worker.name is still 'Worker'", async () => {
+      const session = await manager.createSession();
+      const page = tabManager.getActivePage(session);
+      await page.goto("about:blank");
+
+      const name = await page.evaluate(() => Worker.name);
+      expect(name).toBe("Worker");
+
+      await manager.destroySession(session.id);
+    });
+
+    it("SharedWorker constructor is wrapped when available", async () => {
+      const session = await manager.createSession();
+      const page = tabManager.getActivePage(session);
+      await page.goto("about:blank");
+
+      const result = await page.evaluate(() => {
+        if (typeof SharedWorker === "undefined") return "not-available";
+        const str = SharedWorker.toString();
+        return str.includes("[native code]") ? "native" : "wrapped";
+      });
+
+      // SharedWorker may not be available in headless — both outcomes are valid
+      if (result !== "not-available") {
+        expect(result).toBe("wrapped");
+      }
+
+      await manager.destroySession(session.id);
+    });
+
+    it("init script includes Worker interception for correct platform", () => {
+      const script = stealth.getInitScript("Win32");
+      expect(script).toContain("Worker");
+      expect(script).toContain("SharedWorker");
+      expect(script).toContain("buildWorkerPreamble");
+      expect(script).toContain("webdriver");
+      expect(script).toContain("platform");
     });
   });
 });

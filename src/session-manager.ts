@@ -357,13 +357,13 @@ export class SessionManager implements ISessionManager {
     const viewport = opts?.viewport ?? this.config.defaultViewport;
 
     // Determine if stealth applies: per-session flag overrides global env
-    // KEY INSIGHT (Session 8 research): For persistent profile sessions, stealth
-    // init scripts are counterproductive — they create fingerprint inconsistencies
-    // that score WORSE than honest automation with real cookies/history.
-    // Profile sessions rely on cookie state + browsing history for trust (reCAPTCHA v3
-    // scores ~0.9 with Google cookies vs 0.1-0.3 with fresh profile).
-    // Stealth launch ARGS are still applied (harmless at Chromium level), but init
-    // script injection is skipped unless explicitly requested.
+    // KEY INSIGHT (Session 8 research): For persistent profile sessions, full
+    // stealth (identity faking) is counterproductive — it creates fingerprint
+    // inconsistencies that score WORSE than honest automation with real cookies.
+    // Profile sessions rely on cookie state + browsing history for trust.
+    // However, passive stealth (automation signal removal) is still beneficial
+    // for profiles — it hides navigator.webdriver and Playwright globals
+    // without faking identity.
     const STEALTH_PROFILES = process.env.LEAP_STEALTH_PROFILES === "true";
     const useStealth = opts?.stealth !== undefined
       ? opts.stealth
@@ -371,12 +371,21 @@ export class SessionManager implements ISessionManager {
         ? false  // Profile sessions: trust cookies over fingerprint spoofing
         : stealth.isEnabled();
 
+    // For profile sessions that skip full stealth, apply passive mode
+    // to still remove automation signals (webdriver, Playwright globals)
+    const usePassiveStealth = !useStealth && usePersistentProfile && stealth.isEnabled();
+
     // Always generate a per-session fingerprint for stealth (WebGL, device props, PRNG seed).
     // When LEAP_HUMANIZE is enabled, it also controls UA/viewport/locale/timezone.
     const fp = generateFingerprint();
 
     // Build context options — merge stealth defaults with fingerprint for Sec-CH-UA sync (Phase 2.4)
-    const stealthOpts = useStealth ? stealth.getContextOptions(opts?.userAgent, fp) : {};
+    // For passive profile sessions, still include minimal context opts (locale/timezone)
+    const stealthOpts = useStealth
+      ? stealth.getContextOptions(opts?.userAgent, fp)
+      : usePassiveStealth
+        ? { locale: "en-US", timezoneId: "America/New_York", extraHTTPHeaders: { "Accept-Language": "en-US,en;q=0.9" } }
+        : {};
     const contextOpts: Record<string, unknown> = { viewport, ...stealthOpts };
 
     // Apply humanized fingerprint when LEAP_HUMANIZE is enabled.
@@ -458,8 +467,15 @@ export class SessionManager implements ISessionManager {
     // per-session WebGL/device/PRNG values (Phase 2.1-2.5)
     if (useStealth) {
       await stealth.applyToPage(page, opts?.userAgent, fp);
-    }
-    if (usePersistentProfile && !useStealth) {
+    } else if (usePassiveStealth) {
+      // Profile sessions: apply passive stealth to remove automation signals
+      // (webdriver, Playwright globals) without faking identity.
+      await stealth.applyToPage(page, opts?.userAgent, fp, 'passive');
+      logger.info("session.stealth_passive_for_profile", {
+        profile: opts?.profile,
+        reason: "Profile sessions use passive stealth (automation removal only, no identity faking)",
+      });
+    } else if (usePersistentProfile && !useStealth) {
       logger.info("session.stealth_skipped_for_profile", {
         profile: opts?.profile,
         reason: "Profile sessions use cookie trust instead of fingerprint spoofing",

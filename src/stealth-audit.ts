@@ -1,10 +1,16 @@
 // ─── Stealth Self-Test CLI ─────────────────────────────────────────────────
 //
-// Usage: npx leapfrog --stealth-audit [--local-only] [--full] [--json] [--headed]
+// Usage: npx leapfrog --stealth-audit [--local-only] [--full] [--json] [--headed] [--mode=MODE]
 //
 // Launches a real stealth-patched browser (same as session_create) and runs
 // automated checks against all 19 stealth patches. Returns pass/fail/warn
 // for each check with exit code 0 (all pass) or 1 (any fail).
+//
+// Modes:
+//   --mode=off       No stealth patches (baseline measurement)
+//   --mode=passive   Automation removal only — no identity faking
+//   --mode=active    Full stealth with fingerprint spoofing (default)
+//   --mode=compare   Run all three modes and produce side-by-side comparison
 //
 // Tiers:
 //   Tier 1 — Local checks on about:blank (~2s, always run)
@@ -15,6 +21,7 @@
 import { chromium } from "playwright-core";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 import { stealth } from "./stealth.js";
+import type { StealthModeType } from "./stealth.js";
 import { generateFingerprint } from "./humanize-fingerprint.js";
 import { createRequire } from "module";
 
@@ -23,12 +30,16 @@ const pkg = require("../package.json") as { version: string };
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
+export type AuditMode = 'off' | 'passive' | 'active' | 'compare';
+
 export interface AuditResult {
   label: string;
   status: "pass" | "fail" | "warn";
   detail?: string;
   tier: 1 | 2 | 3;
   priority?: string;
+  /** When true, this failure is expected for the given mode (e.g. plugins=0 in passive) */
+  expected?: boolean;
 }
 
 export interface AuditOptions {
@@ -36,7 +47,46 @@ export interface AuditOptions {
   full?: boolean;
   json?: boolean;
   headed?: boolean;
+  mode?: AuditMode;
 }
+
+/**
+ * Checks that are EXPECTED to fail in specific modes.
+ * These represent honest behavior, not bugs — passive mode doesn't fake
+ * identity, so headless defaults are correct, not defects.
+ */
+const EXPECTED_FAILURES: Record<StealthModeType, Set<string>> = {
+  off: new Set([
+    "P0 navigator.webdriver typeof",
+    "P0 navigator.webdriver 'in' check",
+    "P0 Client Hints clean",
+    "P2 navigator.plugins count",
+    "P2 navigator.mimeTypes count",
+    "P2 outerHeight offset",
+    "P1 connection.rtt > 0",
+    "P1 WebGL vendor clean",
+    "P1 WebGL renderer clean",
+    "chrome.app emulation",
+    "chrome.runtime",
+    "chrome.loadTimes",
+    "Playwright global __pwInitScripts",
+    "Playwright global __playwright",
+  ]),
+  passive: new Set([
+    "P2 navigator.plugins count",
+    "P2 navigator.mimeTypes count",
+    "P2 outerHeight offset",
+    "P1 connection.rtt > 0",
+    "P1 WebGL vendor clean",
+    "P1 WebGL renderer clean",
+    "chrome.app emulation",
+    "chrome.runtime",
+    "chrome.loadTimes",
+  ]),
+  active: new Set([
+    // Active mode aims to pass everything — no expected failures
+  ]),
+};
 
 // ── Tier 1: Local Checks ──────────────────────────────────────────────────
 
@@ -571,10 +621,27 @@ async function runCreepJS(page: Page): Promise<AuditResult[]> {
   return results;
 }
 
+// ── Expected Failure Tagging ─────────────────────────────────────────────
+
+function tagExpectedFailures(results: AuditResult[], mode: StealthModeType): AuditResult[] {
+  const expectedSet = EXPECTED_FAILURES[mode];
+  return results.map((r) => ({
+    ...r,
+    expected: r.status === "fail" && expectedSet.has(r.label) ? true : undefined,
+  }));
+}
+
 // ── Output Formatting ─────────────────────────────────────────────────────
 
-function printResults(results: AuditResult[], durationMs: number): void {
-  console.log(`\nLeapfrog Stealth Audit v${pkg.version}\n`);
+function formatTag(r: AuditResult): string {
+  if (r.status === "pass") return "[pass]";
+  if (r.status === "warn") return "[warn]";
+  if (r.expected) return "[exp.]"; // expected failure — not a bug
+  return "[FAIL]";
+}
+
+function printResults(results: AuditResult[], durationMs: number, mode: AuditMode = "active"): void {
+  console.log(`\nLeapfrog Stealth Audit v${pkg.version} (mode: ${mode})\n`);
 
   // Group by tier
   const tier1 = results.filter((r) => r.tier === 1);
@@ -584,7 +651,7 @@ function printResults(results: AuditResult[], durationMs: number): void {
   if (tier1.length > 0) {
     console.log(`--- Local Checks (${tier1.length} tests) ---`);
     for (const r of tier1) {
-      const tag = r.status === "pass" ? "[pass]" : r.status === "fail" ? "[FAIL]" : "[warn]";
+      const tag = formatTag(r);
       const priority = r.priority ? `${r.priority} ` : "";
       const detail = r.detail ? `  ${r.detail}` : "";
       console.log(`  ${tag}  ${priority}${r.label}${detail}`);
@@ -595,7 +662,7 @@ function printResults(results: AuditResult[], durationMs: number): void {
   if (tier2.length > 0) {
     console.log(`--- External Sites (${tier2.length} tests) ---`);
     for (const r of tier2) {
-      const tag = r.status === "pass" ? "[pass]" : r.status === "fail" ? "[FAIL]" : "[warn]";
+      const tag = formatTag(r);
       const detail = r.detail ? `  ${r.detail}` : "";
       console.log(`  ${tag}  ${r.label}${detail}`);
     }
@@ -605,7 +672,7 @@ function printResults(results: AuditResult[], durationMs: number): void {
   if (tier3.length > 0) {
     console.log(`--- Extended Checks (${tier3.length} tests) ---`);
     for (const r of tier3) {
-      const tag = r.status === "pass" ? "[pass]" : r.status === "fail" ? "[FAIL]" : "[warn]";
+      const tag = formatTag(r);
       const detail = r.detail ? `  ${r.detail}` : "";
       console.log(`  ${tag}  ${r.label}${detail}`);
     }
@@ -613,23 +680,29 @@ function printResults(results: AuditResult[], durationMs: number): void {
   }
 
   const passed = results.filter((r) => r.status === "pass").length;
-  const failed = results.filter((r) => r.status === "fail").length;
+  const failed = results.filter((r) => r.status === "fail" && !r.expected).length;
+  const expected = results.filter((r) => r.expected).length;
   const warned = results.filter((r) => r.status === "warn").length;
   const duration = (durationMs / 1000).toFixed(1);
 
-  console.log(`Summary: ${passed}/${results.length} passed, ${failed} failed, ${warned} warning${warned !== 1 ? "s" : ""}`);
+  let summary = `Summary: ${passed}/${results.length} passed, ${failed} failed`;
+  if (expected > 0) summary += `, ${expected} expected`;
+  summary += `, ${warned} warning${warned !== 1 ? "s" : ""}`;
+  console.log(summary);
   console.log(`Duration: ${duration}s\n`);
 }
 
-function printJSON(results: AuditResult[], durationMs: number): void {
+function printJSON(results: AuditResult[], durationMs: number, mode: AuditMode = "active"): void {
   const output = {
     version: pkg.version,
+    mode,
     timestamp: new Date().toISOString(),
     durationMs,
     summary: {
       total: results.length,
       passed: results.filter((r) => r.status === "pass").length,
-      failed: results.filter((r) => r.status === "fail").length,
+      failed: results.filter((r) => r.status === "fail" && !r.expected).length,
+      expected: results.filter((r) => r.expected).length,
       warned: results.filter((r) => r.status === "warn").length,
     },
     results,
@@ -637,19 +710,143 @@ function printJSON(results: AuditResult[], durationMs: number): void {
   console.log(JSON.stringify(output, null, 2));
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────
+// ── Compare Mode ─────────────────────────────────────────────────────────
 
-export async function runStealthAudit(options: AuditOptions = {}): Promise<void> {
+interface ModeResults {
+  mode: StealthModeType;
+  results: AuditResult[];
+  durationMs: number;
+}
+
+function printCompare(modeResults: ModeResults[]): void {
+  console.log(`\nLeapfrog Stealth Audit v${pkg.version} — Mode Comparison\n`);
+
+  const modes = modeResults.map((m) => m.mode);
+  const colWidth = 10;
+
+  // Header
+  const header = "  " + "".padEnd(40) + modes.map((m) => m.toUpperCase().padStart(colWidth)).join("");
+  console.log(header);
+
+  // Collect all unique labels across all modes, preserving order from first mode that has them
+  const labelOrder: string[] = [];
+  const labelTier = new Map<string, 1 | 2 | 3>();
+  for (const mr of modeResults) {
+    for (const r of mr.results) {
+      if (!labelTier.has(r.label)) {
+        labelOrder.push(r.label);
+        labelTier.set(r.label, r.tier);
+      }
+    }
+  }
+
+  // Build lookup: mode -> label -> result
+  const lookup = new Map<string, Map<string, AuditResult>>();
+  for (const mr of modeResults) {
+    const map = new Map<string, AuditResult>();
+    for (const r of mr.results) {
+      map.set(r.label, r);
+    }
+    lookup.set(mr.mode, map);
+  }
+
+  // Group by tier
+  const tiers: Array<{ tier: 1 | 2 | 3; title: string }> = [
+    { tier: 1, title: "Local Checks" },
+    { tier: 2, title: "External Sites" },
+    { tier: 3, title: "Extended Checks" },
+  ];
+
+  for (const { tier, title } of tiers) {
+    const labels = labelOrder.filter((l) => labelTier.get(l) === tier);
+    if (labels.length === 0) continue;
+
+    const divider = `--- ${title} ${"".padEnd(40 + colWidth * modes.length - title.length - 5, "-")}`;
+    console.log(divider);
+
+    for (const label of labels) {
+      const displayLabel = label.length > 38 ? label.substring(0, 35) + "..." : label;
+      let row = "  " + displayLabel.padEnd(40);
+      for (const mode of modes) {
+        const r = lookup.get(mode)?.get(label);
+        if (!r) {
+          row += "---".padStart(colWidth);
+        } else if (r.status === "pass") {
+          row += "pass".padStart(colWidth);
+        } else if (r.status === "warn") {
+          row += "warn".padStart(colWidth);
+        } else if (r.expected) {
+          row += "exp.".padStart(colWidth);
+        } else {
+          row += "FAIL".padStart(colWidth);
+        }
+      }
+      console.log(row);
+    }
+    console.log();
+  }
+
+  // Summary line per mode
+  console.log("Summary:");
+  for (const mr of modeResults) {
+    const passed = mr.results.filter((r) => r.status === "pass").length;
+    const failed = mr.results.filter((r) => r.status === "fail" && !r.expected).length;
+    const expected = mr.results.filter((r) => r.expected).length;
+    const total = mr.results.length;
+    const duration = (mr.durationMs / 1000).toFixed(1);
+
+    let line = `  ${mr.mode.toUpperCase().padEnd(10)} ${passed}/${total} passed, ${failed} failed`;
+    if (expected > 0) line += `, ${expected} expected`;
+    line += `  (${duration}s)`;
+    console.log(line);
+  }
+  console.log();
+}
+
+function printCompareJSON(modeResults: ModeResults[]): void {
+  const output = {
+    version: pkg.version,
+    mode: "compare" as const,
+    timestamp: new Date().toISOString(),
+    modes: modeResults.map((mr) => ({
+      mode: mr.mode,
+      durationMs: mr.durationMs,
+      summary: {
+        total: mr.results.length,
+        passed: mr.results.filter((r) => r.status === "pass").length,
+        failed: mr.results.filter((r) => r.status === "fail" && !r.expected).length,
+        expected: mr.results.filter((r) => r.expected).length,
+        warned: mr.results.filter((r) => r.status === "warn").length,
+      },
+      results: mr.results,
+    })),
+  };
+  console.log(JSON.stringify(output, null, 2));
+}
+
+// ── Single-Mode Runner ───────────────────────────────────────────────────
+
+/**
+ * Run the audit for a single stealth mode. Returns tagged results.
+ * Extracted from main so compare mode can call it 3 times.
+ */
+export async function runAuditForMode(
+  stealthMode: StealthModeType,
+  options: Pick<AuditOptions, "localOnly" | "full" | "headed">,
+): Promise<{ results: AuditResult[]; durationMs: number }> {
   const start = Date.now();
   const allResults: AuditResult[] = [];
-
   let browser: Browser | null = null;
 
   try {
-    // Launch browser the SAME WAY as session-manager: stealth launch args,
-    // stealth context options, stealth applyToPage — the real stack.
     const headless = !options.headed;
-    const launchArgs = stealth.isEnabled() ? stealth.getLaunchArgs() : [];
+
+    // Launch args: use stealth args for passive/active, none for off.
+    // For passive mode, getLaunchArgs() returns reduced args (no GPU faking).
+    // But since we override at applyToPage level, using full launch args for
+    // passive is also fine — the GPU args don't hurt, and mode override on
+    // applyToPage controls which init scripts actually run.
+    const launchArgs = stealthMode !== "off" ? stealth.getLaunchArgs() : [];
 
     browser = await chromium.launch({
       headless,
@@ -658,7 +855,7 @@ export async function runStealthAudit(options: AuditOptions = {}): Promise<void>
 
     // Generate fingerprint (same as session-manager does)
     const fp = generateFingerprint();
-    const contextOpts = stealth.isEnabled() ? stealth.getContextOptions(undefined, fp) : {};
+    const contextOpts = stealthMode !== "off" ? stealth.getContextOptions(undefined, fp) : {};
     const context: BrowserContext = await browser.newContext({
       viewport: { width: 1280, height: 720 },
       ...contextOpts,
@@ -666,9 +863,9 @@ export async function runStealthAudit(options: AuditOptions = {}): Promise<void>
 
     const page = await context.newPage();
 
-    // Apply stealth init scripts (same as session-manager)
-    if (stealth.isEnabled()) {
-      await stealth.applyToPage(page, undefined, fp);
+    // Apply stealth init scripts with mode override
+    if (stealthMode !== "off") {
+      await stealth.applyToPage(page, undefined, fp, stealthMode);
     }
 
     // ── Tier 1: Local checks ────────────────────────────────────────
@@ -708,16 +905,50 @@ export async function runStealthAudit(options: AuditOptions = {}): Promise<void>
     }
   }
 
-  const durationMs = Date.now() - start;
+  // Tag expected failures for this mode
+  const tagged = tagExpectedFailures(allResults, stealthMode);
+  return { results: tagged, durationMs: Date.now() - start };
+}
 
-  // Output
-  if (options.json) {
-    printJSON(allResults, durationMs);
-  } else {
-    printResults(allResults, durationMs);
+// ── Main ──────────────────────────────────────────────────────────────────
+
+export async function runStealthAudit(options: AuditOptions = {}): Promise<void> {
+  const mode: AuditMode = options.mode ?? "active";
+
+  if (mode === "compare") {
+    // Run all three modes sequentially and produce comparison
+    const modesToRun: StealthModeType[] = ["off", "passive", "active"];
+    const modeResults: ModeResults[] = [];
+
+    for (const m of modesToRun) {
+      if (!options.json) {
+        console.log(`Running audit with mode: ${m}...`);
+      }
+      const result = await runAuditForMode(m, options);
+      modeResults.push({ mode: m, ...result });
+    }
+
+    if (options.json) {
+      printCompareJSON(modeResults);
+    } else {
+      printCompare(modeResults);
+    }
+
+    // Exit 0 for compare mode — it's informational
+    process.exit(0);
   }
 
-  // Exit code
-  const hasFail = allResults.some((r) => r.status === "fail");
-  process.exit(hasFail ? 1 : 0);
+  // Single-mode run
+  const stealthMode: StealthModeType = mode as StealthModeType;
+  const { results, durationMs } = await runAuditForMode(stealthMode, options);
+
+  if (options.json) {
+    printJSON(results, durationMs, mode);
+  } else {
+    printResults(results, durationMs, mode);
+  }
+
+  // Exit code: unexpected failures only (expected failures are fine)
+  const hasUnexpectedFail = results.some((r) => r.status === "fail" && !r.expected);
+  process.exit(hasUnexpectedFail ? 1 : 0);
 }
