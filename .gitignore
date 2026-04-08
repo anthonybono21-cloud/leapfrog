@@ -43,6 +43,10 @@ qa-loop/
 qa-loop.tar.gz
 internal/
 *.tgz
+docs/
+demo-*.mjs
+LAUNCH-CENTRAL.html
+WINDOWS-TEST-PLAN.md
 
 # Build artifacts
 dist/
