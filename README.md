@@ -6,7 +6,7 @@
 <p align="center"><strong>Multi-session browser MCP for AI agents.</strong><br/>36 tools. 15 parallel sessions. Stealth. HUD. Self-improvement. Up to 10x fewer tokens.</p>
 
 <p align="center">
-<code>npm i leapfrog</code>&nbsp;&nbsp;|&nbsp;&nbsp;Works with Claude Code, Cursor, Windsurf
+<code>npm i leapfrog-mcp</code>&nbsp;&nbsp;|&nbsp;&nbsp;Works with Claude Code, Cursor, Windsurf
 </p>
 
 ---
@@ -33,9 +33,9 @@ Savings range from 2-10x depending on page complexity. Content-heavy pages see t
 ## Quick Start
 
 ```bash
-npx leapfrog --doctor          # verify everything works
-npx leapfrog --stealth-audit   # test all 19 stealth patches
-npx leapfrog --config          # print MCP config to paste
+npx leapfrog-mcp --doctor          # verify everything works
+npx leapfrog-mcp --stealth-audit   # test all 19 stealth patches
+npx leapfrog-mcp --config          # print MCP config to paste
 ```
 
 Add to `~/.mcp.json` (Claude Code) or your editor's MCP config:
@@ -44,12 +44,11 @@ Add to `~/.mcp.json` (Claude Code) or your editor's MCP config:
 {
   "leapfrog": {
     "command": "npx",
-    "args": ["-y", "leapfrog"],
+    "args": ["-y", "leapfrog-mcp"],
     "env": {
       "LEAP_MAX_SESSIONS": "15",
       "LEAP_TILE": "true",
       "LEAP_HUD": "true",
-      "LEAP_SOUND": "true",
       "LEAP_AUTO_CONSENT": "true"
     }
   }
@@ -57,8 +56,9 @@ Add to `~/.mcp.json` (Claude Code) or your editor's MCP config:
 ```
 
 Leapfrog uses `playwright-core` (15MB) instead of `playwright` (1.6GB) and does **not** bundle a browser. Either:
-- Set `LEAP_CHANNEL=chrome` to use your installed Chrome/Chromium
+- Set `LEAP_CHANNEL=chrome` to use your installed Chrome/Chromium (recommended)
 - Or run `npx playwright-core install chromium` to install the bundled Chromium binary
+- Or set `LEAP_CDP_ENDPOINT` to connect to an already-running Chrome instance
 
 ## Feature Matrix
 
@@ -94,7 +94,14 @@ Leapfrog uses `playwright-core` (15MB) instead of `playwright` (1.6GB) and does 
 
 ## Stealth
 
-Leapfrog ships 19 anti-detection patches enabled by default (`LEAP_STEALTH=true`). These cover the vectors that fingerprint services like CreepJS and fingerprint-pro actually check:
+Leapfrog ships 19 anti-detection patches enabled by default (`LEAP_STEALTH=true`). Four modes:
+
+- **`true`** (default) — all 19 patches active
+- **`passive`** — removes automation signals only (webdriver, HeadlessChrome). Does NOT fake identity (WebGL, fonts, audio). Better for sites where trust matters more than evasion.
+- **`auto`** — per-domain EXP3 bandit selects the optimal stealth configuration based on what's worked before
+- **`false`** — no stealth patches
+
+These cover the vectors that fingerprint services like CreepJS and fingerprint-pro actually check:
 
 - Client Hints brands (strips HeadlessChrome)
 - `navigator.webdriver` forced to `undefined`
@@ -231,7 +238,7 @@ Leapfrog learns from every visit. Per-domain knowledge persists at `~/.leapfrog/
 | 6 | **Selector healing** | Remembers element fingerprints → selectors, heals broken refs across visits |
 | 7 | **API endpoint caching** | Discovered API endpoints persist across sessions |
 | 8 | **Interaction heat maps** | Tracks which elements agents actually use, suppresses untouched elements _(coming)_ |
-| 9 | **Strategy selection** | Adversarial bandit (EXP3) for stealth config optimization _(coming)_ |
+| 9 | **Strategy selection** | Adversarial bandit (EXP3) for stealth config optimization. Use `LEAP_STEALTH=auto` to enable. |
 
 LRU eviction at 500 domains. Inspect with the `domain_knowledge` tool.
 
@@ -323,23 +330,29 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 | `LEAP_MAX_SESSIONS` | `15` | Max concurrent sessions |
 | `LEAP_IDLE_TIMEOUT` | `1800000` | Session idle timeout in ms (30 min). Set `0` to disable. |
 | `LEAP_HEADLESS` | `true` | Set `false` to watch the browser |
+| `LEAP_HEADED` | `false` | Set `true` to watch the browser (positive alternative to `LEAP_HEADLESS`) |
 | `LEAP_CHANNEL` | _(bundled chromium)_ | Set `chrome` to use your installed Chrome |
+| `LEAP_CDP_ENDPOINT` | _(none)_ | Connect to a running Chrome instance (e.g. `http://localhost:9222`) |
+| `LEAP_EXTENSIONS` | _(none)_ | Comma-separated paths to browser extensions to load |
 | `LEAP_ALLOW_JS` | `true` | Allow JS evaluation in `extract` and `wait_for` |
-| `LEAP_STEALTH` | `true` | Stealth mode (anti-bot evasion) — 19 patches |
+| `LEAP_STEALTH` | `true` | Stealth mode: `true` \| `passive` \| `auto` \| `false`. See Stealth section. |
+| `LEAP_STEALTH_PROFILES` | `false` | Enable stealth patches on profile (auth'd) sessions |
+| `LEAP_CDP_STEALTH` | `true` | CDP detection evasion (`Runtime.enable` filtering) |
 | `LEAP_HUMANIZE` | `false` | Experimental. Human-like mouse movement, typing cadence, and scroll behavior. |
 | `LEAP_ALLOW_EXECUTE` | `true` | Allow the `execute` tool (sandboxed Playwright scripts) |
 | `LEAP_BLOCK_LOCALHOST` | `false` | Block localhost/127.x.x.x (allowed by default for local dev) |
 | `LEAP_PROFILES_DIR` | `~/.leapfrog/chrome-profiles` | Directory for persistent browser profiles |
 | `LEAP_TILE` | `false` | Tile sessions in a grid (`true` \| `master` \| `false`) |
 | `LEAP_TILE_PADDING` | `8` | Padding between tiled windows (px) |
+| `LEAP_MULTI_TILE` | `false` | Multi-terminal tiling coordination across Leapfrog instances |
+| `LEAP_SCREEN_WIDTH` | _(auto)_ | Explicit screen width for tiling calculations |
+| `LEAP_SCREEN_HEIGHT` | _(auto)_ | Explicit screen height for tiling calculations |
 | `LEAP_HUD` | `false` | Click ripple, zoom-to-target, scroll-to-target on agent actions |
-| `LEAP_SOUND` | `false` | Marimba chime on intervention detection (macOS) |
-| `LEAP_NOTIFY` | `false` | macOS notification center alerts on intervention detection |
 | `LEAP_AUTO_CONSENT` | `true` | Auto-dismiss cookie consent banners (10 frameworks + fallback) |
 | `LEAP_TRACE` | `false` | Per-session Playwright tracing (screenshots + DOM snapshots) |
 | `LEAP_RECORD` | `false` | Session recording (action history export) |
-| `LEAP_SIDECAR_PORT` | `9222` | Sidecar HTTP server port (used with tiling) |
-| `LEAP_CDP_STEALTH` | `true` | CDP detection evasion (`Runtime.enable` filtering) |
+| `LEAP_REBROWSER` | `false` | Enable Rebrowser integration |
+| `LEAP_AUTO_WARM` | `false` | Auto-warm profiles by loading key URLs on session create |
 | `LEAP_CAPTCHA_PROVIDER` | _(none)_ | External CAPTCHA solver: `capsolver` \| `2captcha` \| `nopecha` |
 | `LEAP_CAPTCHA_API_KEY` | _(none)_ | API key for the configured CAPTCHA provider |
 | `LEAP_MAX_SESSIONS_PER_CLIENT` | _(none)_ | Per-client session pool limit |
@@ -348,10 +361,10 @@ Leapfrog uses pond metaphors to keep things memorable. Your agent is the frog.
 ## Tests
 
 ```
- 815 passing across 33 suites
+ 769 passing across 31 suites
 ```
 
-Session management, snapshot engine, network intelligence, tab management, security, SSRF protection, stealth patches (19), humanization (mouse, typing, scroll), page classification, harness intelligence, API intelligence, script executor, extended actions, HUD overlays, human intervention, cookie consent, domain knowledge, tracing, sidecar HTTP, bug regression, stress tests, benchmarks.
+Session management, snapshot engine, snapshot differ, network intelligence, tab management, security, SSRF protection, stealth patches (19), stealth enhanced, humanization (mouse, typing, scroll), page classification, harness intelligence, API intelligence, script executor, extended actions, HUD overlays, human intervention, cookie consent, domain knowledge, selector healing, stable elements, tile manager, bug regression, integration smoke, stress tests, benchmarks.
 
 ```bash
 npm test

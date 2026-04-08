@@ -3301,7 +3301,7 @@ function printConfig(): void {
   const config = {
     leapfrog: {
       command: "npx",
-      args: ["-y", "leapfrog"],
+      args: ["-y", "leapfrog-mcp"],
       env: {
         LEAP_MAX_SESSIONS: "15",
       },
