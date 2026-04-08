@@ -141,9 +141,9 @@ if (LEAP_TILE && LEAP_TILE !== "false") {
   const defaultW = LEAP_SCREEN_WIDTH > 0 ? LEAP_SCREEN_WIDTH : detectedScreen?.width ?? 1920;
   const defaultH = LEAP_SCREEN_HEIGHT > 0 ? LEAP_SCREEN_HEIGHT : detectedScreen?.height ?? 1080;
   tilesCoord = new TilesCoordinator(defaultW, defaultH);
-  // Purge ALL slots not owned by this process — handles zombie PIDs
-  // from /mcp reconnects where old node process lingers alive.
-  tilesCoord.purgeOtherPids().catch(() => {});
+  // Reap dead PIDs on startup — clean up crashed/killed instances.
+  // Do NOT purge other live PIDs — they're other terminals we want to tile with.
+  tilesCoord.reapDeadSlots().catch(() => {});
   // File watcher only needed for multi-terminal mode (multiple Leapfrog instances).
   // In single-instance mode, the watcher causes spurious reflows that fight
   // with external monitor positioning. Only enable when explicitly requested.
