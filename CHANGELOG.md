@@ -5,12 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.8] - 2026-04-08
+## [0.7.0] - 2026-04-08
 
 ### Added
 
 - **`session_create_batch` tool** — Create multiple sessions concurrently (5-10x faster than sequential calls). Optional per-session URL navigation, headed mode, viewport, profile. Single `reflowWithContext()` at the end for correct multi-terminal grid positioning.
 - **Dynamic viewport sync** — Page viewport auto-resizes to match tile content area during reflow. No more horizontal scrollbars or clipped content in tiled windows. Sessions with explicit viewports are locked and not overridden.
+- **Ad/tracker blocking** — Blocks 35+ ad/analytics domains by default (`LEAP_AD_BLOCK`). Reduces network traffic 30-50% on content sites. Set `LEAP_AD_BLOCK=false` to disable.
+- **Ghost slot purge on startup** — `purgeOtherPids()` clears stale `tiles.json` slots from previous instances after `/mcp` reconnect.
+
+### Changed
+
+- **Default `waitUntil` changed to `domcontentloaded`** — 2-5x faster page loads on heavy sites (ESPN, NYT, Reddit). Pass `waitUntil: "load"` to override.
 
 ### Bug Fixes (Windows Tiling)
 

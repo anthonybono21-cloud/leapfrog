@@ -350,6 +350,24 @@ export class TilesCoordinator {
   }
 
   /**
+   * Purge all slots NOT owned by the current process.pid.
+   * Called on startup to clear ghost slots from previous instances
+   * that may still be alive (e.g., after /mcp reconnect).
+   */
+  async purgeOtherPids(): Promise<number> {
+    return withLock(async () => {
+      const state = readState(this.screenWidth, this.screenHeight);
+      const before = state.slots.length;
+      state.slots = state.slots.filter((s) => s.instancePid === process.pid);
+      if (state.slots.length !== before) {
+        recalculatePositions(state);
+        writeState(state);
+      }
+      return before - state.slots.length;
+    });
+  }
+
+  /**
    * Watch `tiles.json` for changes made by other instances.
    * The callback fires with the new state whenever the file changes.
    *

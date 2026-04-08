@@ -70,6 +70,48 @@ const LEAP_HUD = process.env.LEAP_HUD === "true";
 const LEAP_AUTO_CONSENT = process.env.LEAP_AUTO_CONSENT !== "false"; // default ON
 const LEAP_TRACE = process.env.LEAP_TRACE === "true";
 const LEAP_RECORD = process.env.LEAP_RECORD === "true";
+const LEAP_AD_BLOCK = process.env.LEAP_AD_BLOCK !== "false"; // default ON
+
+// ── Ad/Tracker Blocking ──────────────────────────────────────────────────
+const AD_BLOCK_DOMAINS = new Set([
+  "doubleclick.net", "googlesyndication.com", "googleadservices.com",
+  "google-analytics.com", "googletagmanager.com", "googletagservices.com",
+  "adservice.google.com", "pagead2.googlesyndication.com",
+  "facebook.net", "connect.facebook.net", "fbcdn.net",
+  "amazon-adsystem.com", "ads-api.twitter.com",
+  "ads.yahoo.com", "analytics.yahoo.com",
+  "scorecardresearch.com", "quantserve.com", "outbrain.com",
+  "taboola.com", "criteo.com", "criteo.net",
+  "moatads.com", "adsrvr.org", "adnxs.com", "rubiconproject.com",
+  "pubmatic.com", "openx.net", "casalemedia.com",
+  "chartbeat.com", "hotjar.com", "mixpanel.com", "segment.io",
+  "newrelic.com", "nr-data.net", "optimizely.com",
+  "demdex.net", "omtrdc.net", "2o7.net",
+  "tealiumiq.com", "tags.tiqcdn.com",
+]);
+
+function shouldBlockUrl(url: string): boolean {
+  try {
+    const hostname = new URL(url).hostname;
+    for (const domain of AD_BLOCK_DOMAINS) {
+      if (hostname === domain || hostname.endsWith("." + domain))
+        return true;
+    }
+  } catch { }
+  return false;
+}
+
+import type { BrowserContext } from "playwright-core";
+function attachAdBlocker(context: BrowserContext): void {
+  if (!LEAP_AD_BLOCK) return;
+  context.route("**/*", (route) => {
+    if (shouldBlockUrl(route.request().url())) {
+      route.abort("blockedbyclient").catch(() => { });
+    } else {
+      route.fallback().catch(() => { });
+    }
+  });
+}
 
 const sessions = new SessionManager({
   maxSessions: MAX_SESSIONS,
@@ -99,6 +141,9 @@ if (LEAP_TILE && LEAP_TILE !== "false") {
   const defaultW = LEAP_SCREEN_WIDTH > 0 ? LEAP_SCREEN_WIDTH : detectedScreen?.width ?? 1920;
   const defaultH = LEAP_SCREEN_HEIGHT > 0 ? LEAP_SCREEN_HEIGHT : detectedScreen?.height ?? 1080;
   tilesCoord = new TilesCoordinator(defaultW, defaultH);
+  // Purge ALL slots not owned by this process — handles zombie PIDs
+  // from /mcp reconnects where old node process lingers alive.
+  tilesCoord.purgeOtherPids().catch(() => {});
   // File watcher only needed for multi-terminal mode (multiple Leapfrog instances).
   // In single-instance mode, the watcher causes spurious reflows that fight
   // with external monitor positioning. Only enable when explicitly requested.
@@ -356,6 +401,7 @@ server.registerTool(
       }
       // Always inject intervention detection (lightweight MutationObserver)
       await session.context.addInitScript(getDetectionInitScript());
+      attachAdBlocker(session.context);
 
       // Start tracing if enabled
       if (LEAP_TRACE) {
@@ -424,6 +470,7 @@ server.registerTool(
           if (LEAP_HUD) await session.context.addInitScript(getHUDInitScript(session.name ?? session.id));
           if (LEAP_AUTO_CONSENT) await session.context.addInitScript(getConsentDismissScript());
           await session.context.addInitScript(getDetectionInitScript());
+          attachAdBlocker(session.context);
           if (LEAP_TRACE) await session.context.tracing.start({ screenshots: true, snapshots: true });
 
           // Claim tile slot (without triggering reflow yet — watcher handles it)
@@ -461,7 +508,7 @@ server.registerTool(
               return;
             }
             await session.page.goto(spec.url, {
-              waitUntil: spec.waitUntil || "load",
+              waitUntil: spec.waitUntil || "domcontentloaded",
               timeout: 30000,
             });
             results.push({ id: session.id, url: spec.url });
@@ -708,7 +755,7 @@ server.registerTool(
       url: z.string().describe("Full URL including https://"),
       waitUntil: z
         .enum(["load", "domcontentloaded", "networkidle"])
-        .default("load")
+        .default("domcontentloaded")
         .describe("Wait strategy. Use networkidle for SPAs."),
       autoRetry: z
         .boolean()
