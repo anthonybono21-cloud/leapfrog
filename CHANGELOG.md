@@ -5,7 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.5] - 2026-04-08
+## [0.6.8] - 2026-04-08
+
+### Added
+
+- **`session_create_batch` tool** — Create multiple sessions concurrently (5-10x faster than sequential calls). Optional per-session URL navigation, headed mode, viewport, profile. Single `reflowWithContext()` at the end for correct multi-terminal grid positioning.
 
 ### Bug Fixes (Windows Tiling)
 

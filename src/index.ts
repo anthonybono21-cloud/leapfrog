@@ -385,6 +385,117 @@ server.registerTool(
   },
 );
 
+// ─── session_create_batch ────────────────────────────────────────────────────
+
+server.registerTool(
+  "session_create_batch",
+  {
+    title: "Create Multiple Browser Sessions",
+    description:
+      "Create multiple isolated browser sessions concurrently — 5-10x faster than sequential session_create calls. " +
+      "Optionally navigate each to a URL. Returns all session IDs. " +
+      "A single reflow positions all windows into a unified grid after all sessions are created.",
+    inputSchema: z.object({
+      sessions: z.array(z.object({
+        url: z.string().optional().describe("URL to navigate after creation."),
+        headed: z.boolean().optional().describe("Run with visible UI."),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Custom viewport."),
+        profile: z.string().optional().describe("Profile shorthand name for persistent Chrome profile."),
+        pinned: z.boolean().optional().describe("Pin to prevent idle timeout."),
+        waitUntil: z.enum(["load", "domcontentloaded", "networkidle"]).optional().describe("Wait strategy for navigation."),
+      })).min(1).max(15).describe("Array of sessions to create."),
+    }).strict(),
+  },
+  async ({ sessions: sessionSpecs }) => {
+    try {
+      const results: { id: string; url?: string; error?: string }[] = [];
+
+      // Phase 1: Create all sessions concurrently
+      const createPromises = sessionSpecs.map(async (spec) => {
+        try {
+          const session = await sessions.createSession({
+            headed: spec.headed,
+            viewport: spec.viewport,
+            profile: spec.profile,
+          });
+          if (spec.pinned) session.pinned = true;
+
+          // Inject init scripts
+          if (LEAP_HUD) await session.context.addInitScript(getHUDInitScript(session.name ?? session.id));
+          if (LEAP_AUTO_CONSENT) await session.context.addInitScript(getConsentDismissScript());
+          await session.context.addInitScript(getDetectionInitScript());
+          if (LEAP_TRACE) await session.context.tracing.start({ screenshots: true, snapshots: true });
+
+          // Claim tile slot (without triggering reflow yet — watcher handles it)
+          if (tilesCoord) {
+            const detected = tileManager.getScreenSize();
+            if (detected) await tilesCoord.updateScreenSize(detected.width, detected.height).catch(() => {});
+            await tilesCoord.claimSlot(session.id).catch(() => {});
+          }
+
+          return { session, spec };
+        } catch (e: any) {
+          return { error: e.message, spec };
+        }
+      });
+
+      const created = await Promise.all(createPromises);
+
+      // Phase 2: Navigate sessions that have URLs (concurrently)
+      const navPromises = created.map(async (result) => {
+        if ("error" in result && result.error) {
+          results.push({ id: "(failed)", url: result.spec.url, error: result.error });
+          return;
+        }
+        const { session, spec } = result as { session: any; spec: typeof sessionSpecs[0] };
+        if (spec.url) {
+          try {
+            const parsed = new URL(spec.url);
+            if (!["http:", "https:"].includes(parsed.protocol)) {
+              results.push({ id: session.id, error: `Blocked URL scheme: ${parsed.protocol}` });
+              return;
+            }
+            const ssrfBlock = await checkSSRF(parsed.hostname);
+            if (ssrfBlock) {
+              results.push({ id: session.id, error: ssrfBlock });
+              return;
+            }
+            await session.page.goto(spec.url, {
+              waitUntil: spec.waitUntil || "load",
+              timeout: 30000,
+            });
+            results.push({ id: session.id, url: spec.url });
+          } catch (e: any) {
+            results.push({ id: session.id, url: spec.url, error: e.message });
+          }
+        } else {
+          results.push({ id: session.id });
+        }
+      });
+
+      await Promise.all(navPromises);
+
+      // Phase 3: Single global reflow
+      await reflowWithContext().catch(() => {});
+
+      const stats = sessions.getStats();
+      const lines = results.map((r) =>
+        r.error
+          ? `${r.id} — ERROR: ${r.error}`
+          : `${r.id}${r.url ? ` → ${r.url}` : ""}`
+      );
+
+      return ok(
+        `Created ${results.filter((r) => !r.error).length}/${sessionSpecs.length} sessions\n` +
+        `Pool: ${stats.active}/${stats.maxSessions} active\n\n` +
+        lines.join("\n"),
+      );
+    } catch (e: any) {
+      return err(e.message);
+    }
+  },
+);
+
 // ─── session_list ───────────────────────────────────────────────────────────
 
 server.registerTool(
