@@ -17,7 +17,7 @@ import { generateFingerprint } from "./humanize-fingerprint.js";
 import { isHumanizeEnabled } from "./humanize-utils.js";
 import { CdpConnector } from "./cdp-connector.js";
 import { installSSRFRouteGuard } from "./ssrf.js";
-import { tileManager } from "./tile-manager.js";
+import { tileManager, TileManager } from "./tile-manager.js";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
@@ -621,13 +621,26 @@ export class SessionManager implements ISessionManager {
     // Record the screen assignment so reflowAll keeps it on this screen.
     if (isHeaded && !cdpConnected && detectedScreen) {
       tileManager.assignSessionScreen(id, detectedScreen);
+      // Lock viewport for sessions with explicitly-set viewport so reflow
+      // doesn't override it. Unlocked sessions get dynamic viewport sync.
+      if (opts?.viewport) {
+        tileManager.lockViewport(id);
+      }
+      const initialBounds = {
+        x: detectedScreen.x,
+        y: detectedScreen.y,
+        width: Math.min(1280, detectedScreen.width),
+        height: Math.min(720, detectedScreen.height),
+      };
       try {
-        await tileManager.positionWindowWithBounds(page, id, {
-          x: detectedScreen.x,
-          y: detectedScreen.y,
-          width: Math.min(1280, detectedScreen.width),
-          height: Math.min(720, detectedScreen.height),
-        });
+        await tileManager.positionWindowWithBounds(page, id, initialBounds);
+        // Dynamic viewport sync on initial placement
+        if (!opts?.viewport) {
+          const viewport = TileManager.calculateViewportFromBounds(initialBounds);
+          try {
+            await page.setViewportSize(viewport);
+          } catch { }
+        }
       } catch (e: any) {
         logger.warn("tile.position_failed", { error: e.message });
       }

@@ -4,7 +4,7 @@
 // Opt-in via LEAP_TILE=true|grid|master env var.
 //
 // Key design:
-//   - Viewport (screenshot resolution) stays at 1280x720 regardless of tile size
+//   - Viewport auto-syncs to tile size during reflow (dynamic viewport)
 //   - Screen detection via page.evaluate() on first headed session, cached
 //   - Accounts for macOS menu bar, Dock, and work area offset
 //   - Launch-time positioning via --window-position/--window-size Chrome args
@@ -56,6 +56,10 @@ class TileManager {
   private windowIds = new Map<string, number>();
   /** Per-session screen assignment — windows stay on the screen where they were created. */
   private sessionScreens = new Map<string, ScreenWorkArea>();
+  /** Sessions with explicitly-set viewports — reflow won't override these. */
+  private viewportLocked = new Set<string>();
+  /** Chrome UI height (tabs, address bar, bookmarks). Subtracted from tile height to get content area. */
+  static CHROME_HEIGHT = process.platform === "darwin" ? 72 : 85;
 
   // ── Configuration ──────────────────────────────────────────────────
 
@@ -391,6 +395,24 @@ if (found) { found; } else {
     logger.debug("tile.position_window", { sessionId });
   }
 
+  /** Calculate the page viewport that fits inside a window of the given bounds. */
+  static calculateViewportFromBounds(bounds: TileBounds): { width: number; height: number } {
+    return {
+      width: Math.max(bounds.width, 400),
+      height: Math.max(bounds.height - TileManager.CHROME_HEIGHT, 200),
+    };
+  }
+
+  /** Lock a session's viewport so reflow won't override an explicitly-set viewport. */
+  lockViewport(sessionId: string): void {
+    this.viewportLocked.add(sessionId);
+  }
+
+  /** Check if a session's viewport is locked. */
+  isViewportLocked(sessionId: string): boolean {
+    return this.viewportLocked.has(sessionId);
+  }
+
   /** Record which screen a session was placed on so reflows keep it there. */
   assignSessionScreen(sessionId: string, screen: ScreenWorkArea): void {
     this.sessionScreens.set(sessionId, screen);
@@ -469,6 +491,18 @@ if (found) { found; } else {
           if (!page || page.isClosed()) return;
 
           await this.positionWindowWithBounds(page, id, bounds);
+
+          // Dynamic viewport sync — resize page viewport to match tile content area.
+          // Skip sessions where user explicitly set a viewport (viewport-locked).
+          if (!this.viewportLocked.has(id)) {
+            const viewport = TileManager.calculateViewportFromBounds(bounds);
+            try {
+              await page.setViewportSize(viewport);
+              logger.debug("tile.viewport_synced", { id, ...viewport });
+            } catch {
+              // Viewport sync is non-fatal
+            }
+          }
         });
       }),
     );
@@ -507,6 +541,7 @@ if (found) { found; } else {
   removeSession(sessionId: string): void {
     this.windowIds.delete(sessionId);
     this.sessionScreens.delete(sessionId);
+    this.viewportLocked.delete(sessionId);
   }
 }
 

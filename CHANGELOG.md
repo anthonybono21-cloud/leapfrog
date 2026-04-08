@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`session_create_batch` tool** — Create multiple sessions concurrently (5-10x faster than sequential calls). Optional per-session URL navigation, headed mode, viewport, profile. Single `reflowWithContext()` at the end for correct multi-terminal grid positioning.
+- **Dynamic viewport sync** — Page viewport auto-resizes to match tile content area during reflow. No more horizontal scrollbars or clipped content in tiled windows. Sessions with explicit viewports are locked and not overridden.
 
 ### Bug Fixes (Windows Tiling)
 
