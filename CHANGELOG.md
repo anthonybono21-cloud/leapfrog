@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-04-08
+
+### Bug Fixes (Windows Tiling)
+
+- **P0: Tiling never enabled on Windows** — Claude Code on Windows does not pass `env` vars from `mcp.json` to MCP child processes. `LEAP_TILE` now defaults to `"grid"` when the env var is missing, enabling tiling out of the box on all platforms.
+- **P1: Unreadable content at high DPI** — Removed `--force-device-scale-factor=1` from Windows launch args. On 250% DPI displays, it forced Chrome to render at 1x scale making text unreadably small.
+- **P1: PowerShell screen detection broken** — DllImport C# interop via template literals produced empty output due to string escaping. Replaced with simple `PrimaryScreen.WorkingArea` approach — no DllImport, no escaping issues.
+- **P1: TilesCoordinator ignored detected screen** — Hardcoded 1920x1080 fallback now reads from `tileManager.getScreenSize()` when env vars aren't set.
+- **P2: Stale window positions after sequential create** — Added debounced (500ms) `reflowAll()` after session creation on Windows. Earlier sessions were stuck at positions calculated for a smaller grid.
+
+---
+
+## [0.6.1] - 2026-04-08
+
+### Added
+
+- **Passive stealth mode** — humanization without active detection evasion
+- **Cross-platform multi-monitor window placement** — JXA (macOS) and PowerShell (Windows) screen detection
+- **Auto-detect terminal's screen** for correct monitor targeting
+
+### Bug Fixes
+
+- **Windows headed mode** — force full Chromium binary, not headless shell
+- **Screen size env vars** (`LEAP_SCREEN_WIDTH`/`HEIGHT`) now parsed correctly
+- **5 bugs from Windows test report** (BUG-1,2,5,7,8)
+- **README accuracy** — correct package name, test counts, env vars, removed dead features
+
+### Cleanup
+
+- Removed dead modules (sound, notifications, sidecar, bandit, heat maps)
+- npm package renamed to `leapfrog-mcp`
+- Hardened `.gitignore`, removed session prompt from repo
+
+---
+
+## [0.6.0] - 2026-04-04
+
+### Added
+
+- **Session identity** — auto-naming, pinning, enriched `pool_status`
+- **HUD overlays** — borders, status bar, cursor position, click ripple (`LEAP_HUD`)
+- **Human intervention** — `@..@` overlay + `wait_for_human` tool for CAPTCHA/auth flows
+- **Cookie consent auto-dismiss** — 10 frameworks, default ON (`LEAP_AUTO_CONSENT`)
+- **Playwright tracing** — `session_export_trace` tool (`LEAP_TRACE`)
+- **Per-domain knowledge** — persistent learning at `~/.leapfrog/domains/`
+- **Self-improvement loop** — stable element suppression, selector healing, consent learning, stealth tier adaptation, wait strategy optimization, captcha method learning, failure prevention
+- **Auto-resolve captcha/challenges** with retry logic
+
+### Bug Fixes
+
+- **`__pwInitScripts` race condition** — cleanup runs at top of first init script
+- **`@eN` ref tab isolation** — stale-ref invalidation on tab switch
+
+### Testing
+
+- **797 tests** across 32 suites (up from 537/20 in v0.5.2)
+- 34 tools (+3 new: `wait_for_human`, `domain_knowledge`, `session_export_trace`)
+
+---
+
 ## [0.5.2] - 2026-04-03
 
 ### Security

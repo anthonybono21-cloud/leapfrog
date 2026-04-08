@@ -288,10 +288,9 @@ export class SessionManager {
             if (stealth.isEnabled()) {
                 launchArgs.push(...stealth.getLaunchArgs());
             }
-            // Windows DPI: prevent Chromium from double-scaling window positions
-            if (process.platform === 'win32') {
-                launchArgs.push('--force-device-scale-factor=1');
-            }
+            // Windows DPI: --force-device-scale-factor=1 REMOVED
+            // On high-DPI Windows (250%), it renders content at 1x = unreadable tiny text.
+            // Let Chrome auto-detect DPI; CDP handles window positioning correctly without it.
             // ── Window position args ───────────────────────────────────────
             // When tiling: grid position. Otherwise: just place on the detected screen.
             const screen = tileManager.getScreenSize();
@@ -577,6 +576,22 @@ export class SessionManager {
             catch (e) {
                 logger.warn("tile.position_failed", { error: e.message });
             }
+        }
+        // ── Debounced reflow after creation (Windows only) ─────────────
+        // On Windows, launch args position each window for a grid that includes
+        // only the sessions created so far. Earlier windows end up at stale positions.
+        // Reflow all after a 500ms debounce so rapid batch creates settle into one reflow.
+        // Skipped on macOS where CDP reflow can move windows to the wrong screen.
+        if (process.platform === "win32" && tileManager.isEnabled() && this.sessions.size > 1) {
+            clearTimeout(globalThis.__leapReflowTimer);
+            globalThis.__leapReflowTimer = setTimeout(async () => {
+                try {
+                    await tileManager.reflowAll(this.sessions);
+                }
+                catch (e) {
+                    logger.warn("tile.reflow_after_create_failed", { error: e.message });
+                }
+            }, 500);
         }
         // ── Auto-reflow on external close ──────────────────────────────
         // When the user manually closes a browser window (X button), clean up

@@ -116,36 +116,15 @@ class TileManager {
   }
 
   /**
-   * Windows: detect which monitor contains the foreground window via PowerShell.
-   * Uses .NET System.Windows.Forms.Screen to map foreground window → screen bounds.
+   * Windows: detect primary screen working area via PowerShell.
+   * Uses System.Windows.Forms.Screen — no DllImport, no escaping issues.
    */
   static detectScreenViaPowershell(): ScreenWorkArea | null {
     try {
-      // PowerShell script:
-      // 1. Get foreground window handle via user32.dll
-      // 2. Get window RECT via user32.dll
-      // 3. Find which Screen contains that RECT
-      // 4. Output WorkingArea (excludes taskbar) as "x y width height"
-      const script = `powershell -NoProfile -NonInteractive -Command "
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -TypeDefinition '
-using System;
-using System.Runtime.InteropServices;
-public class WinAPI {
-  [DllImport(\\\"user32.dll\\\")] public static extern IntPtr GetForegroundWindow();
-  [DllImport(\\\"user32.dll\\\")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
-}
-'
-$hwnd = [WinAPI]::GetForegroundWindow()
-$rect = New-Object WinAPI+RECT
-[void][WinAPI]::GetWindowRect($hwnd, [ref]$rect)
-$pt = New-Object System.Drawing.Point($rect.Left, $rect.Top)
-$scr = [System.Windows.Forms.Screen]::FromPoint($pt)
-$wa = $scr.WorkingArea
-Write-Output ('{0} {1} {2} {3}' -f $wa.X, $wa.Y, $wa.Width, $wa.Height)
-"`;
-      const result = execSync(script, { timeout: 10000, encoding: "utf-8" }).trim();
+      const result = execSync(
+        'powershell -NoProfile -NonInteractive -Command "Add-Type -AssemblyName System.Windows.Forms; $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea; Write-Output ($wa.X.ToString() + \' \' + $wa.Y.ToString() + \' \' + $wa.Width.ToString() + \' \' + $wa.Height.ToString())"',
+        { timeout: 10000, encoding: "utf-8" }
+      ).trim();
       const parts = result.split(/\s+/).map(Number);
       if (parts.length === 4 && parts.every((n) => !isNaN(n))) {
         return { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };

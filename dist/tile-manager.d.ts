@@ -48,8 +48,8 @@ declare class TileManager {
      */
     static detectTerminalScreen(): ScreenWorkArea | null;
     /**
-     * Windows: detect which monitor contains the foreground window via PowerShell.
-     * Uses .NET System.Windows.Forms.Screen to map foreground window → screen bounds.
+     * Windows: detect primary screen working area via PowerShell.
+     * Uses System.Windows.Forms.Screen — no DllImport, no escaping issues.
      */
     static detectScreenViaPowershell(): ScreenWorkArea | null;
     detectScreen(page: Page): Promise<ScreenWorkArea>;

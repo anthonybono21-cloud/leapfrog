@@ -49,7 +49,9 @@ const MAX_SNAPSHOT_CHARS = 10000;
 const ALLOW_JS = process.env.LEAP_ALLOW_JS !== "false";
 const ALLOW_EXECUTE = process.env.LEAP_ALLOW_EXECUTE !== "false";
 const LEAP_PROFILES_DIR = process.env.LEAP_PROFILES_DIR ?? path.join(os.homedir(), ".leapfrog", "chrome-profiles");
-const LEAP_TILE = process.env.LEAP_TILE;
+// WORKAROUND: Claude Code on Windows does not pass mcp.json env vars to child process.
+// Default to "grid" so tiling works out of the box on all platforms.
+const LEAP_TILE = process.env.LEAP_TILE || "grid";
 const LEAP_TILE_PADDING = Number(process.env.LEAP_TILE_PADDING ?? 8);
 const LEAP_SCREEN_WIDTH = Number(process.env.LEAP_SCREEN_WIDTH || 0);
 const LEAP_SCREEN_HEIGHT = Number(process.env.LEAP_SCREEN_HEIGHT || 0);
@@ -79,9 +81,10 @@ if (LEAP_TILE && LEAP_TILE !== "false") {
 // Zero cost for single-terminal (just tracks one instance). No extra env var needed.
 let tilesCoord = null;
 if (LEAP_TILE && LEAP_TILE !== "false") {
-    // Screen size: prefer env vars, fall back to 1920x1080. CDP detection will update later.
-    const defaultW = LEAP_SCREEN_WIDTH > 0 ? LEAP_SCREEN_WIDTH : 1920;
-    const defaultH = LEAP_SCREEN_HEIGHT > 0 ? LEAP_SCREEN_HEIGHT : 1080;
+    // Screen size: prefer env vars, then auto-detected screen, fall back to 1920x1080.
+    const detectedScreen = tileManager.getScreenSize();
+    const defaultW = LEAP_SCREEN_WIDTH > 0 ? LEAP_SCREEN_WIDTH : detectedScreen?.width ?? 1920;
+    const defaultH = LEAP_SCREEN_HEIGHT > 0 ? LEAP_SCREEN_HEIGHT : detectedScreen?.height ?? 1080;
     tilesCoord = new TilesCoordinator(defaultW, defaultH);
     // File watcher only needed for multi-terminal mode (multiple Leapfrog instances).
     // In single-instance mode, the watcher causes spurious reflows that fight
@@ -3002,7 +3005,7 @@ function printConfig() {
     const config = {
         leapfrog: {
             command: "npx",
-            args: ["-y", "leapfrog"],
+            args: ["-y", "leapfrog-mcp"],
             env: {
                 LEAP_MAX_SESSIONS: "15",
             },
