@@ -633,21 +633,9 @@ export class SessionManager implements ISessionManager {
       }
     }
 
-    // ── Debounced reflow after creation (Windows only) ─────────────
-    // On Windows, launch args position each window for a grid that includes
-    // only the sessions created so far. Earlier windows end up at stale positions.
-    // Reflow all after a 500ms debounce so rapid batch creates settle into one reflow.
-    // Skipped on macOS where CDP reflow can move windows to the wrong screen.
-    if (process.platform === "win32" && tileManager.isEnabled() && this.sessions.size > 1) {
-      clearTimeout((globalThis as any).__leapReflowTimer);
-      (globalThis as any).__leapReflowTimer = setTimeout(async () => {
-        try {
-          await tileManager.reflowAll(this.sessions);
-        } catch (e: any) {
-          logger.warn("tile.reflow_after_create_failed", { error: e.message });
-        }
-      }, 500);
-    }
+    // Reflow is handled by the TilesCoordinator file watcher in index.ts,
+    // which calls reflowWithContext() with global multi-terminal grid state.
+    // A local-only reflowAll here would override the global grid positions.
 
     // ── Auto-reflow on external close ──────────────────────────────
     // When the user manually closes a browser window (X button), clean up
