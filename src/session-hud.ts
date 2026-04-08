@@ -87,6 +87,7 @@ export function getHUDInitScript(sessionName: string): string {
     container.appendChild(ripple);
     ripple.addEventListener('animationend', function() { ripple.remove(); });
   };
+
 })();`;
 }
 
@@ -138,6 +139,119 @@ export function getScrollToTargetZoomOut(selector: string): string {
     el.scrollIntoView({ block: 'center' });
   }
 })()`;
+}
+
+// ─── Agent Eyes Init Script ───────────────────────────────────────────────
+
+/**
+ * Returns JS to inject cursor tracking + scroll indicator for headed sessions.
+ * Always-on for headed mode — not gated by LEAP_HUD.
+ * Zero Node.js overhead: listens to native DOM events dispatched by Playwright.
+ */
+export function getAgentEyesInitScript(): string {
+  return `(function() {
+  if (window.__leapfrog_eyes_initialized) return;
+  window.__leapfrog_eyes_initialized = true;
+
+  function init() {
+    // ── CSS ──────────────────────────────────────────────────────────
+    var style = document.createElement('style');
+    style.setAttribute('data-leapfrog', 'true');
+    style.textContent = \`
+      #leapfrog-cursor {
+        position: fixed;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        background: rgba(34, 197, 94, 0.8);
+        box-shadow: 0 0 12px rgba(34, 197, 94, 0.5), 0 0 4px rgba(34, 197, 94, 0.8);
+        pointer-events: none;
+        z-index: 2147483646;
+        transform: translate(-50%, -50%);
+        transition: left 0.04s linear, top 0.04s linear, opacity 0.3s ease;
+        opacity: 0;
+      }
+      #leapfrog-cursor-ring {
+        position: fixed;
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        border: 2px solid rgba(34, 197, 94, 0.4);
+        pointer-events: none;
+        z-index: 2147483646;
+        transform: translate(-50%, -50%);
+        transition: left 0.08s ease-out, top 0.08s ease-out, opacity 0.3s ease;
+        opacity: 0;
+      }
+      #leapfrog-scroll-indicator {
+        position: fixed;
+        right: 16px;
+        top: 50%;
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        background: rgba(34, 197, 94, 0.7);
+        color: #fff;
+        font-size: 20px;
+        line-height: 36px;
+        text-align: center;
+        pointer-events: none;
+        z-index: 2147483646;
+        opacity: 0;
+        transition: opacity 0.15s ease-out;
+        transform: translateY(-50%);
+      }
+    \`;
+    (document.head || document.documentElement).appendChild(style);
+
+    // ── Agent Cursor (dot + trailing ring) ──────────────────────────
+    var cursor = document.createElement('div');
+    cursor.id = 'leapfrog-cursor';
+    cursor.setAttribute('data-leapfrog', 'true');
+    (document.body || document.documentElement).appendChild(cursor);
+
+    var ring = document.createElement('div');
+    ring.id = 'leapfrog-cursor-ring';
+    ring.setAttribute('data-leapfrog', 'true');
+    (document.body || document.documentElement).appendChild(ring);
+
+    var cursorTimeout;
+    document.addEventListener('mousemove', function(e) {
+      cursor.style.left = e.clientX + 'px';
+      cursor.style.top = e.clientY + 'px';
+      cursor.style.opacity = '1';
+      ring.style.left = e.clientX + 'px';
+      ring.style.top = e.clientY + 'px';
+      ring.style.opacity = '1';
+      clearTimeout(cursorTimeout);
+      cursorTimeout = setTimeout(function() {
+        cursor.style.opacity = '0';
+        ring.style.opacity = '0';
+      }, 3000);
+    }, true);
+
+    // ── Scroll Indicator ────────────────────────────────────────────
+    var scrollArrow = document.createElement('div');
+    scrollArrow.id = 'leapfrog-scroll-indicator';
+    scrollArrow.setAttribute('data-leapfrog', 'true');
+    (document.body || document.documentElement).appendChild(scrollArrow);
+
+    var scrollFadeTimeout;
+    document.addEventListener('wheel', function(e) {
+      scrollArrow.textContent = e.deltaY > 0 ? '\\u25BC' : '\\u25B2';
+      scrollArrow.style.opacity = '1';
+      clearTimeout(scrollFadeTimeout);
+      scrollFadeTimeout = setTimeout(function() { scrollArrow.style.opacity = '0'; }, 400);
+    }, true);
+  }
+
+  // Defer until body exists — init scripts can run before DOM is ready
+  if (document.body) {
+    init();
+  } else {
+    document.addEventListener('DOMContentLoaded', init);
+  }
+})();`;
 }
 
 /** Legacy single-call version (sync scroll only, no zoom). */

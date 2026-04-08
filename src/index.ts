@@ -29,7 +29,7 @@ import { runStealthAudit } from "./stealth-audit.js";
 import { exportSession, replayRecording } from "./recording.js";
 import type { Recording } from "./recording.js";
 import { paginate } from "./paginate.js";
-import { getHUDInitScript, getHUDUpdateScript, getClickRippleScript, getScrollToTargetScript, getScrollToTargetZoomIn, getScrollToTargetZoomOut } from "./session-hud.js";
+import { getHUDInitScript, getHUDUpdateScript, getClickRippleScript, getScrollToTargetScript, getScrollToTargetZoomIn, getScrollToTargetZoomOut, getAgentEyesInitScript } from "./session-hud.js";
 import type { HUDStatus } from "./session-hud.js";
 import { getDetectionInitScript, getDetectionCheckScript, getOverlayScript, getDismissScript, getResolutionCheckScript, parseDetectionResult, getPressAndHoldDetectScript, solvePressAndHold } from "./intervention.js";
 import type { PressAndHoldDetection } from "./intervention.js";
@@ -401,6 +401,8 @@ server.registerTool(
       }
       // Always inject intervention detection (lightweight MutationObserver)
       await session.context.addInitScript(getDetectionInitScript());
+      // Agent eyes — cursor dot + scroll indicator (zero Node overhead, listens to native DOM events)
+      await session.context.addInitScript(getAgentEyesInitScript());
       attachAdBlocker(session.context);
 
       // Start tracing if enabled
@@ -470,6 +472,7 @@ server.registerTool(
           if (LEAP_HUD) await session.context.addInitScript(getHUDInitScript(session.name ?? session.id));
           if (LEAP_AUTO_CONSENT) await session.context.addInitScript(getConsentDismissScript());
           await session.context.addInitScript(getDetectionInitScript());
+          await session.context.addInitScript(getAgentEyesInitScript());
           attachAdBlocker(session.context);
           if (LEAP_TRACE) await session.context.tracing.start({ screenshots: true, snapshots: true });
 
