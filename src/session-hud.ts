@@ -160,23 +160,20 @@ export function getAgentEyesInitScript(): string {
     style.textContent = \`
       #leapfrog-cursor {
         position: fixed;
-        width: 20px;
-        height: 20px;
-        border-radius: 50%;
-        background: rgba(34, 197, 94, 0.8);
-        box-shadow: 0 0 12px rgba(34, 197, 94, 0.5), 0 0 4px rgba(34, 197, 94, 0.8);
+        width: 28px;
+        height: 28px;
         pointer-events: none;
         z-index: 2147483646;
-        transform: translate(-50%, -50%);
         transition: left 0.04s linear, top 0.04s linear, opacity 0.3s ease;
         opacity: 0;
+        filter: drop-shadow(0 1px 3px rgba(0,0,0,0.4)) drop-shadow(0 0 8px rgba(34,197,94,0.3));
       }
       #leapfrog-cursor-ring {
         position: fixed;
         width: 36px;
         height: 36px;
         border-radius: 50%;
-        border: 2px solid rgba(34, 197, 94, 0.4);
+        border: 2px solid rgba(34, 197, 94, 0.3);
         pointer-events: none;
         z-index: 2147483646;
         transform: translate(-50%, -50%);
@@ -208,6 +205,7 @@ export function getAgentEyesInitScript(): string {
     var cursor = document.createElement('div');
     cursor.id = 'leapfrog-cursor';
     cursor.setAttribute('data-leapfrog', 'true');
+    cursor.innerHTML = '<svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 2L12 26L15 15L26 12L2 2Z" fill="#22c55e" stroke="#166534" stroke-width="1.5" stroke-linejoin="round"/></svg>';
     (document.body || document.documentElement).appendChild(cursor);
 
     var ring = document.createElement('div');
