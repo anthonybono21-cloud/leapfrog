@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.4] - 2026-04-08
+## [0.6.5] - 2026-04-08
 
 ### Bug Fixes (Windows Tiling)
 
@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **P1: TilesCoordinator ignored detected screen** — Hardcoded 1920x1080 fallback now reads from `tileManager.getScreenSize()` when env vars aren't set.
 - **P2: Stale window positions after sequential create** — Added debounced (500ms) `reflowAll()` after session creation on Windows. Earlier sessions were stuck at positions calculated for a smaller grid.
 - **P2: Multi-terminal tiling disabled by default** — `LEAP_MULTI_TILE` changed from opt-in (`=== "true"`) to opt-out (`!== "false"`) so cross-terminal tiling works without env vars.
+- **P2: Multi-terminal watcher used local-only reflow** — Watcher callback now calls `reflowWithContext()` which reads global slot assignments from `tiles.json`, positioning each terminal's windows in correct cells of the unified grid.
 
 ---
 

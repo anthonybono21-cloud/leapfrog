@@ -105,13 +105,8 @@ if (LEAP_TILE && LEAP_TILE !== "false") {
   if (LEAP_MULTI_TILE) {
     tilesCoord.watch((state) => {
       if (tileManager.isEnabled()) {
-        const sessionMap = new Map<string, Session>();
-        for (const si of sessions.listSessions()) {
-          const sess = sessions.getSession(si.id);
-          if (sess) sessionMap.set(si.id, sess);
-        }
-        logger.info("tile.watcher_reflow", { globalTotal: state.slots.length, local: sessionMap.size });
-        tileManager.reflowAll(sessionMap).catch((e) => logger.warn("tile.watcher_reflow_failed", { error: e?.message }));
+        logger.info("tile.watcher_reflow", { globalTotal: state.slots.length });
+        reflowWithContext().catch((e) => logger.warn("tile.watcher_reflow_failed", { error: e?.message }));
       }
     });
   }
