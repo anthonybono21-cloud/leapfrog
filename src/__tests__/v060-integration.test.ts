@@ -22,15 +22,6 @@ describe("Group 1: Import Verification", () => {
     expect(intervention).toBeDefined();
   });
 
-  it("imports sidecar without errors", async () => {
-    const sidecar = await import("../sidecar.js");
-    expect(sidecar).toBeDefined();
-  });
-
-  it("imports notify without errors", async () => {
-    const notify = await import("../notify.js");
-    expect(notify).toBeDefined();
-  });
 
   it("imports consent-dismiss without errors", async () => {
     const consent = await import("../consent-dismiss.js");
@@ -47,8 +38,6 @@ describe("Group 1: Import Verification", () => {
     expect(typeof hud.getHUDInitScript).toBe("function");
     expect(typeof hud.getHUDUpdateScript).toBe("function");
     expect(typeof hud.getClickRippleScript).toBe("function");
-    expect(typeof hud.getMoveCursorScript).toBe("function");
-    expect(typeof hud.getToggleCursorScript).toBe("function");
   });
 
   it("intervention exports the expected functions and types", async () => {
@@ -61,16 +50,6 @@ describe("Group 1: Import Verification", () => {
     expect(typeof intervention.parseDetectionResult).toBe("function");
   });
 
-  it("sidecar exports the SidecarServer class", async () => {
-    const sidecar = await import("../sidecar.js");
-    expect(typeof sidecar.SidecarServer).toBe("function");
-  });
-
-  it("notify exports chime and alert functions", async () => {
-    const notify = await import("../notify.js");
-    expect(typeof notify.chime).toBe("function");
-    expect(typeof notify.alert).toBe("function");
-  });
 
   it("consent-dismiss exports the expected functions", async () => {
     const consent = await import("../consent-dismiss.js");
@@ -276,27 +255,6 @@ describe("Group 4: Module API Contract Verification", () => {
     })).toBeNull();
   });
 
-  it("SidecarServer constructor accepts a SidecarDeps object", async () => {
-    const { SidecarServer } = await import("../sidecar.js");
-    const mockDeps = {
-      listSessions: () => [],
-      focusSession: async () => {},
-      zoomSession: async () => {},
-      restoreGrid: async () => {},
-      setLayout: async () => {},
-      destroyAll: async () => {},
-      screenshot: async () => Buffer.from(""),
-    };
-    const server = new SidecarServer(mockDeps);
-    expect(server).toBeDefined();
-    expect(server).toBeInstanceOf(SidecarServer);
-  });
-
-  it("chime is a function, alert is a function (from notify)", async () => {
-    const notify = await import("../notify.js");
-    expect(typeof notify.chime).toBe("function");
-    expect(typeof notify.alert).toBe("function");
-  });
 
   it("getConsentDismissScript takes no args and returns string", async () => {
     const { getConsentDismissScript } = await import("../consent-dismiss.js");

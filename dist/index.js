@@ -27,17 +27,12 @@ import { adaptiveNavigate, formatAdaptiveResult } from "./adaptive-wait.js";
 import { runStealthAudit } from "./stealth-audit.js";
 import { exportSession, replayRecording } from "./recording.js";
 import { paginate } from "./paginate.js";
-import { getHUDInitScript, getHUDUpdateScript, getClickRippleScript, getMoveCursorScript } from "./session-hud.js";
+import { getHUDInitScript, getHUDUpdateScript, getClickRippleScript } from "./session-hud.js";
 import { getDetectionInitScript, getDetectionCheckScript, getResolutionCheckScript, parseDetectionResult, getPressAndHoldDetectScript, solvePressAndHold } from "./intervention.js";
-import { SidecarServer } from "./sidecar.js";
-import { alert as notifyAlert } from "./notify.js";
 import { getConsentDismissScript, getCacheSelectorScript, getTermsAutoCheckScript } from "./consent-dismiss.js";
 import { solveCaptcha, isCaptchaSolverEnabled } from "./captcha-solver.js";
 import { domainKnowledge, normalizeDomain } from "./domain-knowledge.js";
 import { TilesCoordinator } from "./tiles-coordinator.js";
-import { strategyManager, armToStealthMode } from "./stealth-bandit.js";
-import { stealth } from "./stealth.js";
-import { interactionTracker } from "./interaction-tracker.js";
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json");
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -63,7 +58,6 @@ const LEAP_HUD = process.env.LEAP_HUD === "true";
 const LEAP_AUTO_CONSENT = process.env.LEAP_AUTO_CONSENT !== "false"; // default ON
 const LEAP_TRACE = process.env.LEAP_TRACE === "true";
 const LEAP_RECORD = process.env.LEAP_RECORD === "true";
-const LEAP_SIDECAR_PORT = Number(process.env.LEAP_SIDECAR_PORT ?? 9222);
 const sessions = new SessionManager({
     maxSessions: MAX_SESSIONS,
     idleTimeoutMs: IDLE_TIMEOUT_MS,
@@ -166,17 +160,6 @@ async function snapAndFormat(session, opts) {
         const stableFPs = domainKnowledge.getStableFingerprints(suppressDomain, 3);
         if (stableFPs.length > 0) {
             suppressFingerprints = new Set(stableFPs);
-        }
-        // Merge interaction heat map suppress set (never-touched elements on mature domains)
-        const domainRecord = domainKnowledge.get(suppressDomain);
-        if (domainRecord) {
-            const heatSuppressSet = interactionTracker.getSuppressSet(suppressDomain, domainRecord.visitCount);
-            if (heatSuppressSet.size > 0) {
-                if (!suppressFingerprints)
-                    suppressFingerprints = new Set();
-                for (const fp of heatSuppressSet)
-                    suppressFingerprints.add(fp);
-            }
         }
     }
     // BUG-8 fix: Mark all existing refs as stale before generating new ones.
@@ -608,32 +591,11 @@ server.registerTool("navigate", {
         if (hints.stealthTier && hints.stealthTier > 0) {
             effectiveMaxRetryLevel = Math.max(maxRetryLevel, hints.stealthTier + 1);
         }
-        // ── EXP3 Bandit: closed-loop stealth strategy selection ──────────
-        // 1. Restore bandit state from domain knowledge (warm start)
-        if (hints.hasBanditState) {
-            const savedBandit = domainKnowledge.getBanditState(urlDomain);
-            if (savedBandit) {
-                strategyManager.fromJSON(urlDomain, savedBandit);
-            }
-        }
-        // 2. Select strategy — the bandit picks an arm based on learned weights
-        const banditSelection = strategyManager.selectStrategy(urlDomain);
-        // 3. Map arm to stealth mode — only override when LEAP_STEALTH=auto
-        //    (user-explicit modes like true/passive/false always take precedence)
-        const banditStealthMode = armToStealthMode(banditSelection.armIndex);
-        const useBanditMode = stealth.isBanditMode();
-        // 4. Apply bandit-selected stealth mode to page before navigation
-        //    Only when bandit mode is active and the mode differs from session default
-        if (useBanditMode && banditStealthMode !== 'off') {
-            await stealth.applyToPage(page, undefined, undefined, banditStealthMode);
-        }
         // Adaptive navigate with wait strategy selection + stealth escalation
         const result = await adaptiveNavigate(page, session, url, sessions, {
             waitUntil: effectiveWaitUntil,
             autoRetry,
             maxRetryLevel: effectiveMaxRetryLevel,
-            stealthModeOverride: useBanditMode ? banditStealthMode : undefined,
-            banditArmIndex: banditSelection.armIndex,
         });
         // P0-2: Post-navigation SSRF check — catch 302 redirects to internal IPs
         try {
@@ -679,18 +641,6 @@ server.registerTool("navigate", {
                 ? `challenge:${result.classification.signals?.join(",") ?? "unknown"}`
                 : `blocked:${result.escalation?.label ?? "initial"}`;
             domainKnowledge.recordBlock(urlDomain, reason);
-        }
-        // EXP3 bandit: record outcome and persist state (closes the feedback loop)
-        strategyManager.recordOutcome(urlDomain, banditSelection.armIndex, !wasBlocked);
-        // Persist bandit state into domain knowledge for cross-session learning
-        const banditState = strategyManager.toJSON(urlDomain);
-        if (banditState) {
-            domainKnowledge.saveBanditState(urlDomain, banditState);
-        }
-        // Update domain knowledge stealth tier to match bandit's selection
-        // This keeps the legacy stealthTier field in sync with the bandit
-        if (!wasBlocked) {
-            domainKnowledge.update(urlDomain, { stealthTier: banditSelection.armIndex });
         }
         // Auto-dismiss known consent selector from domain knowledge
         if (hints.consentSelector) {
@@ -924,7 +874,6 @@ server.registerTool("navigate", {
                         if (LEAP_HUD) {
                             await result.page.evaluate(getHUDUpdateScript("waiting")).catch(() => { });
                         }
-                        notifyAlert("Leapfrog", `Human needed: ${intervention.reason}`);
                         logger.info("intervention.detected", { sessionId, type: intervention.type, reason: intervention.reason });
                     }
                 }
@@ -981,17 +930,6 @@ server.registerTool("snapshot", {
             const stableFPs = domainKnowledge.getStableFingerprints(session.domain, 3);
             if (stableFPs.length > 0) {
                 suppressFingerprints = new Set(stableFPs);
-            }
-            // Merge interaction heat map suppress set
-            const domainRecord = domainKnowledge.get(session.domain);
-            if (domainRecord) {
-                const heatSuppressSet = interactionTracker.getSuppressSet(session.domain, domainRecord.visitCount);
-                if (heatSuppressSet.size > 0) {
-                    if (!suppressFingerprints)
-                        suppressFingerprints = new Set();
-                    for (const fp of heatSuppressSet)
-                        suppressFingerprints.add(fp);
-                }
             }
         }
         // Take the snapshot
@@ -1281,7 +1219,6 @@ server.registerTool("act", {
                         if (box) {
                             const cx = box.x + box.width / 2;
                             const cy = box.y + box.height / 2;
-                            await page.evaluate(getMoveCursorScript(cx, cy));
                             await page.evaluate(getClickRippleScript(cx, cy));
                         }
                     }
@@ -1651,7 +1588,6 @@ server.registerTool("act", {
                                 if (LEAP_HUD) {
                                     await page.evaluate(getHUDUpdateScript("waiting")).catch(() => { });
                                 }
-                                notifyAlert("Leapfrog", `Human needed: ${finalCheck.reason}`);
                             }
                         }
                     }
@@ -1692,16 +1628,6 @@ server.registerTool("act", {
         // P0-3: Record act tool call in session memory
         const actDuration = Date.now() - startTime;
         HarnessIntelligence.recordToolCall(sessionId, 'act', { action, target, value }, `${action}${target ? ` ${target}` : ''}`, actDuration);
-        // Interaction heat map: record element usage for future suppression
-        if (session.domain && target && session.refFingerprints) {
-            const fp = session.refFingerprints.get(target);
-            if (fp) {
-                const iType = (action === 'fill' || action === 'type') ? 'fill'
-                    : (action === 'click' || action === 'dblclick') ? 'click' : undefined;
-                if (iType)
-                    interactionTracker.recordInteraction(session.domain, fp, iType);
-            }
-        }
         if (urlAfter !== urlBefore) {
             try {
                 await page.waitForLoadState("load", { timeout: 5000 });
@@ -1881,12 +1807,6 @@ server.registerTool("extract", {
         // P0-3: Record extract in session memory
         const duration = Date.now() - startTime;
         HarnessIntelligence.recordToolCall(sessionId, 'extract', { type, target }, `Extract ${type}: ${result.slice(0, 80)}`, duration);
-        // Interaction heat map: record extract on targeted elements
-        if (session.domain && target && session.refFingerprints) {
-            const fp = session.refFingerprints.get(target);
-            if (fp)
-                interactionTracker.recordInteraction(session.domain, fp, 'extract');
-        }
         return ok(result || "(empty)");
     }
     catch (e) {
@@ -2724,7 +2644,6 @@ server.registerTool("wait_for_human", {
         if (LEAP_HUD) {
             await page.evaluate(getHUDUpdateScript("waiting")).catch(() => { });
         }
-        notifyAlert("Leapfrog", `Human needed: ${reason}`);
         // Poll until challenge/page resolves (check every 500ms, max 5 minutes)
         const timeout = 5 * 60 * 1000;
         const start = Date.now();
@@ -3135,48 +3054,6 @@ async function main() {
     }
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    // Start sidecar HTTP control server for headed mode
-    if (LEAP_TILE && LEAP_TILE !== "false") {
-        const sidecar = new SidecarServer({
-            listSessions: () => sessions.listSessions().map(s => ({ id: s.id, name: s.name, url: s.url })),
-            focusSession: async (id) => {
-                const s = requireSession(id);
-                const page = getPage(s);
-                await page.bringToFront();
-            },
-            zoomSession: async (id) => {
-                const s = requireSession(id);
-                const page = getPage(s);
-                await page.bringToFront();
-            },
-            restoreGrid: async () => {
-                await reflowWithContext();
-            },
-            setLayout: async (layout) => {
-                if (tileManager.isEnabled()) {
-                    tileManager.configure({ layout: layout === "master" ? "master" : "grid", padding: LEAP_TILE_PADDING });
-                    await reflowWithContext();
-                }
-            },
-            destroyAll: async () => { await sessions.destroyAll(); },
-            screenshot: async (id) => {
-                const s = requireSession(id);
-                const page = getPage(s);
-                return await page.screenshot();
-            },
-        });
-        try {
-            await sidecar.start(LEAP_SIDECAR_PORT);
-        }
-        catch (e) {
-            if (e?.code === "EADDRINUSE") {
-                logger.warn("sidecar.port_in_use", { port: LEAP_SIDECAR_PORT, message: "Another Leapfrog instance owns this port. Sidecar disabled for this process." });
-            }
-            else {
-                throw e;
-            }
-        }
-    }
     console.error(`Leapfrog MCP server running (max ${MAX_SESSIONS} sessions, headless=${HEADLESS}${tileManager.isEnabled() ? `, tile=${tileManager.getLayout()}` : ""}${LEAP_HUD ? ", HUD" : ""}${LEAP_TRACE ? ", tracing" : ""})`);
 }
 main().catch((e) => {

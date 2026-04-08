@@ -26,19 +26,6 @@ interface DelayRange {
   max: number;
 }
 
-/** Form field transition method. */
-export type FieldTransition = "tab" | "click";
-
-/** Result from formFieldTransition — describes how to move between fields. */
-export interface FormFieldTiming {
-  /** Method to use for field navigation. */
-  method: FieldTransition;
-  /** Inter-field delay in ms (log-normal distributed). */
-  delay: number;
-  /** Whether this transition should revisit an earlier field (10% chance). */
-  revisitPrevious: boolean;
-}
-
 // ─── Delay Ranges ──────────────────────────────────────────────────────────
 
 /**
@@ -64,9 +51,6 @@ const NAV_SETTLE_FLOOR_MS = 500;
 
 /** Median first-interaction delay after navigation (log-normal center). */
 const NAV_FIRST_INTERACTION_MEDIAN_MS = 1500;
-
-/** Average adult reading speed in words per minute (Brysbaert 2019). */
-const READING_WPM = 238;
 
 // ─── ThinkPause Class ──────────────────────────────────────────────────────
 
@@ -150,54 +134,6 @@ export class ThinkPause {
     return NAV_SETTLE_FLOOR_MS;
   }
 
-  /**
-   * Calculate a minimum dwell time based on visible content word count.
-   * Returns the reading-time floor in ms — the absolute minimum time a
-   * human would need to read the content before interacting.
-   *
-   * Formula: wordCount / 238 WPM * 60 * 1000 ms
-   * (238 WPM = average adult silent reading speed, Brysbaert 2019)
-   *
-   * This is a FLOOR — actual dwell can and should be longer.
-   *
-   * No-op if humanization is disabled (returns 0).
-   *
-   * @param wordCount - Number of visible words on the page/section
-   * @returns Minimum dwell time in ms
-   */
-  contentDwell(wordCount: number): number {
-    if (!this.isEnabled()) return 0;
-    if (wordCount <= 0) return 0;
-
-    return Math.round((wordCount / READING_WPM) * 60 * 1000);
-  }
-
-  /**
-   * Generate timing for navigating between form fields.
-   * Simulates human form-filling behavior:
-   * - 60% Tab / 40% click for field navigation
-   * - Variable inter-field timing: 150-1500ms (log-normal, median ~400ms)
-   * - 10% chance of revisiting an earlier field
-   *
-   * This is a timing HELPER — it returns the parameters for the caller
-   * to execute the actual navigation. It does not perform any Playwright
-   * actions itself.
-   *
-   * No-op if humanization is disabled (returns a default with 0 delay).
-   *
-   * @returns FormFieldTiming with method, delay, and revisit flag
-   */
-  formFieldTransition(): FormFieldTiming {
-    if (!this.isEnabled()) {
-      return { method: "tab", delay: 0, revisitPrevious: false };
-    }
-
-    const method: FieldTransition = Math.random() < 0.6 ? "tab" : "click";
-    const delay = logNormalDelay(400, 0.45, 150);
-    const revisitPrevious = Math.random() < 0.10;
-
-    return { method, delay: Math.min(delay, 1500), revisitPrevious };
-  }
 }
 
 export const thinkPause = new ThinkPause();

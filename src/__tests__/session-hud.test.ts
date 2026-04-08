@@ -3,8 +3,6 @@ import {
   getHUDInitScript,
   getHUDUpdateScript,
   getClickRippleScript,
-  getMoveCursorScript,
-  getToggleCursorScript,
   getScrollToTargetScript,
 } from "../session-hud.js";
 import type { HUDStatus } from "../session-hud.js";
@@ -67,34 +65,6 @@ describe("session-hud", () => {
       const script = getClickRippleScript(100, 200);
       expect(script).toContain("100");
       expect(script).toContain("200");
-    });
-  });
-
-  // ── getMoveCursorScript ────────────────────────────────────────────
-
-  describe("getMoveCursorScript", () => {
-    it("returns empty string (agent cursor removed)", () => {
-      const script = getMoveCursorScript(50, 75);
-      expect(script).toBe("");
-    });
-  });
-
-  // ── getToggleCursorScript ──────────────────────────────────────────
-
-  describe("getToggleCursorScript", () => {
-    it("returns empty string for both true and false (cursor removed)", () => {
-      const showScript = getToggleCursorScript(true);
-      const hideScript = getToggleCursorScript(false);
-      expect(showScript).toBe("");
-      expect(hideScript).toBe("");
-    });
-
-    it("visible=true returns empty string", () => {
-      expect(getToggleCursorScript(true)).toBe("");
-    });
-
-    it("visible=false returns empty string", () => {
-      expect(getToggleCursorScript(false)).toBe("");
     });
   });
 

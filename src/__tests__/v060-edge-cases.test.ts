@@ -8,10 +8,8 @@ import { describe, it, expect, afterAll, afterEach, vi } from "vitest";
 import { tmpdir } from "os";
 import { join } from "path";
 import { writeFile, mkdir, chmod, rm, readFile, readdir } from "fs/promises";
-import * as http from "node:http";
 
 import { DomainKnowledge } from "../domain-knowledge.js";
-import { SidecarServer, type SidecarDeps } from "../sidecar.js";
 import {
   parseDetectionResult,
   getOverlayScript,
@@ -32,7 +30,6 @@ import {
 // ---------------------------------------------------------------------------
 
 const cleanupDirs: string[] = [];
-const cleanupServers: SidecarServer[] = [];
 
 function makeTempDir(suffix = ""): string {
   const dir = join(
@@ -43,39 +40,11 @@ function makeTempDir(suffix = ""): string {
   return dir;
 }
 
-function httpGet(
-  url: string,
-): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
-  return new Promise((resolve, reject) => {
-    http
-      .get(url, (res) => {
-        const chunks: Buffer[] = [];
-        res.on("data", (chunk: Buffer) => chunks.push(chunk));
-        res.on("end", () => {
-          resolve({
-            status: res.statusCode ?? 0,
-            headers: res.headers,
-            body: Buffer.concat(chunks),
-          });
-        });
-        res.on("error", reject);
-      })
-      .on("error", reject);
-  });
-}
-
 // ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 
 afterAll(async () => {
-  for (const s of cleanupServers) {
-    try {
-      await s.stop();
-    } catch {
-      /* best-effort */
-    }
-  }
   for (const dir of cleanupDirs) {
     try {
       // Restore write permissions so rm can clean up
@@ -364,153 +333,6 @@ describe("DomainKnowledge — edge cases", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SIDECAR EDGE CASES
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("SidecarServer — edge cases", () => {
-  function makeMockDeps(overrides?: Partial<SidecarDeps>): SidecarDeps {
-    return {
-      listSessions: vi.fn(() => [
-        { id: "s_test1", name: "test-1", url: "https://example.com" },
-      ]),
-      focusSession: vi.fn(async () => {}),
-      zoomSession: vi.fn(async () => {}),
-      restoreGrid: vi.fn(async () => {}),
-      setLayout: vi.fn(async () => {}),
-      destroyAll: vi.fn(async () => {}),
-      screenshot: vi.fn(async () => Buffer.from([0x89, 0x50, 0x4e, 0x47])),
-      ...overrides,
-    };
-  }
-
-  async function startServer(deps?: SidecarDeps): Promise<{ server: SidecarServer; baseUrl: string }> {
-    const server = new SidecarServer(deps ?? makeMockDeps());
-    await server.start(0);
-    cleanupServers.push(server);
-    const addr = (server as any).server.address();
-    const port = typeof addr === "object" ? addr.port : 0;
-    return { server, baseUrl: `http://127.0.0.1:${port}` };
-  }
-
-  // ── 9. Double start ────────────────────────────────────────────────────
-
-  it("calling start() twice on the same port rejects (EADDRINUSE)", async () => {
-    const deps = makeMockDeps();
-    const server1 = new SidecarServer(deps);
-    await server1.start(0);
-    cleanupServers.push(server1);
-    const addr = (server1 as any).server.address();
-    const port = addr.port;
-
-    // Starting a second server on the same port should fail
-    const server2 = new SidecarServer(deps);
-    await expect(server2.start(port)).rejects.toThrow();
-  });
-
-  // ── 10. Start, stop, start lifecycle ───────────────────────────────────
-
-  it("start -> stop -> start lifecycle works cleanly", async () => {
-    const deps = makeMockDeps();
-    const server = new SidecarServer(deps);
-
-    await server.start(0);
-    const addr1 = (server as any).server.address();
-    expect(addr1).toBeTruthy();
-
-    await server.stop();
-    expect((server as any).server).toBeNull();
-
-    // Restart on a new port
-    await server.start(0);
-    cleanupServers.push(server);
-    const addr2 = (server as any).server.address();
-    expect(addr2).toBeTruthy();
-
-    const { status } = await httpGet(`http://127.0.0.1:${addr2.port}/health`);
-    expect(status).toBe(200);
-  });
-
-  // ── 11. Concurrent requests ────────────────────────────────────────────
-
-  it("20 concurrent GET /sessions all return valid JSON", async () => {
-    const { baseUrl } = await startServer();
-
-    const requests = Array.from({ length: 20 }, () =>
-      httpGet(`${baseUrl}/sessions`),
-    );
-    const results = await Promise.all(requests);
-
-    for (const { status, body } of results) {
-      expect(status).toBe(200);
-      const json = JSON.parse(body.toString());
-      expect(json.ok).toBe(true);
-      expect(Array.isArray(json.data)).toBe(true);
-    }
-  });
-
-  // ── 12. Invalid paths ─────────────────────────────────────────────────
-
-  it("GET /focus/ (no ID) returns 400", async () => {
-    const { baseUrl } = await startServer();
-    const { status, body } = await httpGet(`${baseUrl}/focus/`);
-    expect(status).toBe(400);
-    const json = JSON.parse(body.toString());
-    expect(json.ok).toBe(false);
-    expect(json.error).toContain("Missing session ID");
-  });
-
-  it("GET /zoom/ (no ID) returns 400", async () => {
-    const { baseUrl } = await startServer();
-    const { status, body } = await httpGet(`${baseUrl}/zoom/`);
-    expect(status).toBe(400);
-    const json = JSON.parse(body.toString());
-    expect(json.ok).toBe(false);
-  });
-
-  it("GET /layout/invalid_type still returns 200 (layout is passthrough)", async () => {
-    const deps = makeMockDeps();
-    const { baseUrl } = await startServer(deps);
-    const { status, body } = await httpGet(`${baseUrl}/layout/invalid_type`);
-    expect(status).toBe(200);
-    const json = JSON.parse(body.toString());
-    expect(json.ok).toBe(true);
-    expect(json.data.layout).toBe("invalid_type");
-    expect(deps.setLayout).toHaveBeenCalledWith("invalid_type");
-  });
-
-  // ── 13. Large screenshot ───────────────────────────────────────────────
-
-  it("5MB screenshot response is delivered completely", async () => {
-    const bigBuf = Buffer.alloc(5 * 1024 * 1024, 0x42);
-    // Set PNG magic bytes at start
-    bigBuf[0] = 0x89;
-    bigBuf[1] = 0x50;
-    bigBuf[2] = 0x4e;
-    bigBuf[3] = 0x47;
-
-    const deps = makeMockDeps({
-      screenshot: vi.fn(async () => bigBuf),
-    });
-    const { baseUrl } = await startServer(deps);
-
-    const { status, headers, body } = await httpGet(
-      `${baseUrl}/screenshot/s_test1`,
-    );
-    expect(status).toBe(200);
-    expect(headers["content-type"]).toBe("image/png");
-    expect(body.length).toBe(5 * 1024 * 1024);
-    expect(body[0]).toBe(0x89);
-  });
-
-  // ── 14. Stop without start ─────────────────────────────────────────────
-
-  it("stop() on a never-started server resolves without throwing", async () => {
-    const server = new SidecarServer(makeMockDeps());
-    await expect(server.stop()).resolves.toBeUndefined();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
 // INTERVENTION EDGE CASES
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -779,93 +601,3 @@ describe("consent-dismiss — edge cases", () => {
   });
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-// NOTIFY EDGE CASES
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("notify — edge cases", () => {
-  const originalEnv = { ...process.env };
-
-  afterEach(() => {
-    process.env = { ...originalEnv };
-    vi.restoreAllMocks();
-    vi.resetModules();
-  });
-
-  async function loadNotify() {
-    return await import("../notify.js");
-  }
-
-  // ── 26. Alert with quotes and special chars ────────────────────────────
-
-  it("alert with double quotes does not throw (disabled)", async () => {
-    delete process.env.LEAP_NOTIFY;
-    const { alert } = await loadNotify();
-    expect(() => alert('Title "with" quotes', "Message with 'single' and $pecial chars")).not.toThrow();
-  });
-
-  it("alert with backticks and template literal syntax does not throw (disabled)", async () => {
-    delete process.env.LEAP_NOTIFY;
-    const { alert } = await loadNotify();
-    expect(() => alert("Title `with` backticks", "Message ${with} template")).not.toThrow();
-  });
-
-  it("alert with newlines in title and message does not throw (disabled)", async () => {
-    delete process.env.LEAP_NOTIFY;
-    const { alert } = await loadNotify();
-    expect(() => alert("Title\nwith\nnewlines", "Message\nwith\nnewlines")).not.toThrow();
-  });
-
-  it("alert with empty strings does not throw (disabled)", async () => {
-    delete process.env.LEAP_NOTIFY;
-    const { alert } = await loadNotify();
-    expect(() => alert("", "")).not.toThrow();
-  });
-
-  // ── 27. Volume boundaries ──────────────────────────────────────────────
-
-  it("chime(0) does not throw when sound is disabled", async () => {
-    delete process.env.LEAP_SOUND;
-    const { chime } = await loadNotify();
-    expect(() => chime(0)).not.toThrow();
-  });
-
-  it("chime(1) does not throw when sound is disabled", async () => {
-    delete process.env.LEAP_SOUND;
-    const { chime } = await loadNotify();
-    expect(() => chime(1)).not.toThrow();
-  });
-
-  it("chime(-1) does not throw when sound is disabled", async () => {
-    delete process.env.LEAP_SOUND;
-    const { chime } = await loadNotify();
-    expect(() => chime(-1)).not.toThrow();
-  });
-
-  it("chime(100) does not throw when sound is disabled", async () => {
-    delete process.env.LEAP_SOUND;
-    const { chime } = await loadNotify();
-    expect(() => chime(100)).not.toThrow();
-  });
-
-  it("chime(NaN) does not throw when sound is disabled", async () => {
-    delete process.env.LEAP_SOUND;
-    const { chime } = await loadNotify();
-    expect(() => chime(NaN)).not.toThrow();
-  });
-
-  it("chime(Infinity) does not throw when sound is disabled", async () => {
-    delete process.env.LEAP_SOUND;
-    const { chime } = await loadNotify();
-    expect(() => chime(Infinity)).not.toThrow();
-  });
-
-  it("playSound with boundary volumes does not throw when sound is disabled", async () => {
-    delete process.env.LEAP_SOUND;
-    const { playSound } = await loadNotify();
-    expect(() => playSound("/tmp/test.mp3", 0)).not.toThrow();
-    expect(() => playSound("/tmp/test.mp3", -1)).not.toThrow();
-    expect(() => playSound("/tmp/test.mp3", NaN)).not.toThrow();
-    expect(() => playSound("/tmp/test.mp3", Infinity)).not.toThrow();
-  });
-});

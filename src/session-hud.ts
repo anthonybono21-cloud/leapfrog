@@ -15,16 +15,6 @@ import { logger } from "./logger.js";
 
 export type HUDStatus = "active" | "loading" | "waiting" | "error" | "complete";
 
-// ─── Color Map ─────────────────────────────────────────────────────────────
-
-const STATUS_COLORS: Record<HUDStatus, string> = {
-  active: "#22c55e",
-  loading: "#3b82f6",
-  waiting: "#f59e0b",
-  error: "#ef4444",
-  complete: "#8b5cf6",
-};
-
 // ─── Init Script ───────────────────────────────────────────────────────────
 
 /**
@@ -112,15 +102,6 @@ export function getClickRippleScript(x: number, y: number): string {
   return `window.__leapfrog_clickRipple && window.__leapfrog_clickRipple(${x}, ${y});`;
 }
 
-/** Returns empty string (agent cursor removed). Kept for API compatibility. */
-export function getMoveCursorScript(_x: number, _y: number): string {
-  return "";
-}
-
-/** Returns empty string (agent cursor removed). Kept for API compatibility. */
-export function getToggleCursorScript(_visible: boolean): string {
-  return "";
-}
 
 // ─── Scroll-to-Target ─────────────────────────────────────────────────────
 

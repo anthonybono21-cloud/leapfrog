@@ -236,11 +236,6 @@ export class HumanMouse {
   /** Per-session motor profile for consistent behavioral fingerprint. */
   private profile: MotorProfile;
 
-  /** Timer handle for idle drift. */
-  private idleDriftTimer: ReturnType<typeof setInterval> | null = null;
-
-  /** Timestamp of last cursor movement (for idle drift threshold). */
-  private lastMoveTime = 0;
 
   constructor() {
     this.profile = generateMotorProfile();
@@ -330,7 +325,6 @@ export class HumanMouse {
 
     // Update last known position
     this.lastPosition = { x, y };
-    this.lastMoveTime = Date.now();
   }
 
   /**
@@ -353,69 +347,6 @@ export class HumanMouse {
 
     // Update position after click
     this.lastPosition = { x, y };
-    this.lastMoveTime = Date.now();
-  }
-
-  /**
-   * Start idle cursor drift on a page. When the cursor has been parked
-   * for >500ms, applies sine-wave-based micro-movements of +/-2.5px at
-   * ~60Hz to prevent the "perfectly still cursor" signal that bot
-   * detectors like DataDome look for.
-   *
-   * Uses a sum of sine waves at irrational frequency ratios to produce
-   * Perlin-noise-like organic movement without requiring a full noise
-   * library.
-   *
-   * Limitation: requires a Page reference and runs on an interval.
-   * Call stopIdleDrift() when the page/session is destroyed.
-   *
-   * @param page - Playwright page instance to emit mouse events on
-   */
-  startIdleDrift(page: Page): void {
-    if (this.idleDriftTimer) return; // already running
-
-    const startTime = Date.now();
-
-    this.idleDriftTimer = setInterval(async () => {
-      // Only drift if cursor has been idle for >500ms
-      if (Date.now() - this.lastMoveTime < 500) return;
-
-      const pos = this.getStartPosition();
-      const elapsed = (Date.now() - startTime) / 1000; // seconds
-
-      // Sum of sine waves at irrational frequency ratios for organic motion.
-      // Frequencies chosen so they don't produce repeating patterns.
-      const driftX =
-        Math.sin(elapsed * 1.17) * 1.2 +
-        Math.sin(elapsed * 2.73) * 0.8 +
-        Math.sin(elapsed * 0.41) * 0.5;
-      const driftY =
-        Math.sin(elapsed * 0.93) * 1.1 +
-        Math.sin(elapsed * 2.19) * 0.9 +
-        Math.sin(elapsed * 0.57) * 0.5;
-
-      // Scale by motor profile tremor (shakier profiles = more drift)
-      const scale = this.profile.tremor;
-      const newX = pos.x + driftX * scale;
-      const newY = pos.y + driftY * scale;
-
-      try {
-        await page.mouse.move(newX, newY);
-      } catch {
-        // Page may be closed — silently stop drift
-        this.stopIdleDrift();
-      }
-    }, 16); // ~60Hz
-  }
-
-  /**
-   * Stop idle cursor drift and clean up the interval timer.
-   */
-  stopIdleDrift(): void {
-    if (this.idleDriftTimer) {
-      clearInterval(this.idleDriftTimer);
-      this.idleDriftTimer = null;
-    }
   }
 }
 
