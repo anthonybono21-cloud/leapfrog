@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.3] - 2026-04-08
+## [0.6.4] - 2026-04-08
 
 ### Bug Fixes (Windows Tiling)
 
@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **P1: PowerShell screen detection broken** — DllImport C# interop via template literals produced empty output due to string escaping. Replaced with simple `PrimaryScreen.WorkingArea` approach — no DllImport, no escaping issues.
 - **P1: TilesCoordinator ignored detected screen** — Hardcoded 1920x1080 fallback now reads from `tileManager.getScreenSize()` when env vars aren't set.
 - **P2: Stale window positions after sequential create** — Added debounced (500ms) `reflowAll()` after session creation on Windows. Earlier sessions were stuck at positions calculated for a smaller grid.
+- **P2: Multi-terminal tiling disabled by default** — `LEAP_MULTI_TILE` changed from opt-in (`=== "true"`) to opt-out (`!== "false"`) so cross-terminal tiling works without env vars.
 
 ---
 

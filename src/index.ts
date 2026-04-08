@@ -63,7 +63,9 @@ const LEAP_TILE = process.env.LEAP_TILE || "grid";
 const LEAP_TILE_PADDING = Number(process.env.LEAP_TILE_PADDING ?? 8);
 const LEAP_SCREEN_WIDTH = Number(process.env.LEAP_SCREEN_WIDTH || 0);
 const LEAP_SCREEN_HEIGHT = Number(process.env.LEAP_SCREEN_HEIGHT || 0);
-const LEAP_MULTI_TILE = process.env.LEAP_MULTI_TILE === "true";
+// WORKAROUND: Claude Code on Windows does not pass mcp.json env vars.
+// Default multi-tile ON so cross-terminal tiling works out of the box.
+const LEAP_MULTI_TILE = process.env.LEAP_MULTI_TILE !== "false";
 const LEAP_HUD = process.env.LEAP_HUD === "true";
 const LEAP_AUTO_CONSENT = process.env.LEAP_AUTO_CONSENT !== "false"; // default ON
 const LEAP_TRACE = process.env.LEAP_TRACE === "true";
