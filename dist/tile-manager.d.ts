@@ -30,6 +30,10 @@ declare class TileManager {
     private windowIds;
     /** Per-session screen assignment — windows stay on the screen where they were created. */
     private sessionScreens;
+    /** Sessions with explicitly-set viewports — reflow won't override these. */
+    private viewportLocked;
+    /** Chrome UI height (tabs, address bar, bookmarks). Subtracted from tile height to get content area. */
+    static CHROME_HEIGHT: number;
     configure(opts: {
         layout: TileLayout;
         padding: number;
@@ -79,6 +83,15 @@ declare class TileManager {
         globalIndex: number;
     }): string[];
     positionWindow(page: Page, sessionId: string): Promise<void>;
+    /** Calculate the page viewport that fits inside a window of the given bounds. */
+    static calculateViewportFromBounds(bounds: TileBounds): {
+        width: number;
+        height: number;
+    };
+    /** Lock a session's viewport so reflow won't override an explicitly-set viewport. */
+    lockViewport(sessionId: string): void;
+    /** Check if a session's viewport is locked. */
+    isViewportLocked(sessionId: string): boolean;
     /** Record which screen a session was placed on so reflows keep it there. */
     assignSessionScreen(sessionId: string, screen: ScreenWorkArea): void;
     /** Get the screen assigned to a session, or the current global screen. */

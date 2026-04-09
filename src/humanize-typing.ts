@@ -165,7 +165,11 @@ export function humanTypeString(text: string, opts: TypeOptions = {}): Keystroke
 
     // ── Compute inter-key delay (flight time) ──────────────────────
     let delay: number;
-    if (burstRemaining > 0) {
+    if (char === "\n") {
+      // Line break: cognitive pause (always, even during bursts)
+      delay = logNormalDelay(400, 0.5, 150);
+      if (burstRemaining > 0) { burstRemaining = 0; inBurst = false; }
+    } else if (burstRemaining > 0) {
       // Burst: 50% of base delay, still log-normal distributed
       delay = logNormalDelay(Math.round(baseDelay * 0.5), 0.35, 25);
       burstRemaining--;
@@ -176,9 +180,6 @@ export function humanTypeString(text: string, opts: TypeOptions = {}): Keystroke
     } else if (/[.,;:!?]/.test(char)) {
       // Punctuation: slightly longer pause
       delay = logNormalDelay(200, 0.4, 80);
-    } else if (char === "\n") {
-      // Line break: cognitive pause
-      delay = logNormalDelay(400, 0.5, 150);
     } else {
       // Regular character: log-normal around baseDelay with bigram adjustment
       const multiplier = prevChar ? bigramMultiplier(prevChar, lower) : 1.0;

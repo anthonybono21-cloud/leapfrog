@@ -8,7 +8,7 @@ import { generateFingerprint } from "./humanize-fingerprint.js";
 import { isHumanizeEnabled } from "./humanize-utils.js";
 import { CdpConnector } from "./cdp-connector.js";
 import { installSSRFRouteGuard } from "./ssrf.js";
-import { tileManager } from "./tile-manager.js";
+import { tileManager, TileManager } from "./tile-manager.js";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
@@ -565,34 +565,35 @@ export class SessionManager {
         // Record the screen assignment so reflowAll keeps it on this screen.
         if (isHeaded && !cdpConnected && detectedScreen) {
             tileManager.assignSessionScreen(id, detectedScreen);
+            // Lock viewport for sessions with explicitly-set viewport so reflow
+            // doesn't override it. Unlocked sessions get dynamic viewport sync.
+            if (opts?.viewport) {
+                tileManager.lockViewport(id);
+            }
+            const initialBounds = {
+                x: detectedScreen.x,
+                y: detectedScreen.y,
+                width: Math.min(1280, detectedScreen.width),
+                height: Math.min(720, detectedScreen.height),
+            };
             try {
-                await tileManager.positionWindowWithBounds(page, id, {
-                    x: detectedScreen.x,
-                    y: detectedScreen.y,
-                    width: Math.min(1280, detectedScreen.width),
-                    height: Math.min(720, detectedScreen.height),
-                });
+                await tileManager.positionWindowWithBounds(page, id, initialBounds);
+                // Dynamic viewport sync on initial placement
+                if (!opts?.viewport) {
+                    const viewport = TileManager.calculateViewportFromBounds(initialBounds);
+                    try {
+                        await page.setViewportSize(viewport);
+                    }
+                    catch { }
+                }
             }
             catch (e) {
                 logger.warn("tile.position_failed", { error: e.message });
             }
         }
-        // ── Debounced reflow after creation (Windows only) ─────────────
-        // On Windows, launch args position each window for a grid that includes
-        // only the sessions created so far. Earlier windows end up at stale positions.
-        // Reflow all after a 500ms debounce so rapid batch creates settle into one reflow.
-        // Skipped on macOS where CDP reflow can move windows to the wrong screen.
-        if (process.platform === "win32" && tileManager.isEnabled() && this.sessions.size > 1) {
-            clearTimeout(globalThis.__leapReflowTimer);
-            globalThis.__leapReflowTimer = setTimeout(async () => {
-                try {
-                    await tileManager.reflowAll(this.sessions);
-                }
-                catch (e) {
-                    logger.warn("tile.reflow_after_create_failed", { error: e.message });
-                }
-            }, 500);
-        }
+        // Reflow is handled by the TilesCoordinator file watcher in index.ts,
+        // which calls reflowWithContext() with global multi-terminal grid state.
+        // A local-only reflowAll here would override the global grid positions.
         // ── Auto-reflow on external close ──────────────────────────────
         // When the user manually closes a browser window (X button), clean up
         // the session and reflow remaining tiled windows. Without this, closing

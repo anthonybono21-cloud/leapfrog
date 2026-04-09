@@ -27,7 +27,7 @@ import { adaptiveNavigate, formatAdaptiveResult } from "./adaptive-wait.js";
 import { runStealthAudit } from "./stealth-audit.js";
 import { exportSession, replayRecording } from "./recording.js";
 import { paginate } from "./paginate.js";
-import { getHUDInitScript, getHUDUpdateScript, getClickRippleScript } from "./session-hud.js";
+import { getHUDInitScript, getHUDUpdateScript, getClickRippleScript, getAgentEyesInitScript } from "./session-hud.js";
 import { getDetectionInitScript, getDetectionCheckScript, getResolutionCheckScript, parseDetectionResult, getPressAndHoldDetectScript, solvePressAndHold } from "./intervention.js";
 import { getConsentDismissScript, getCacheSelectorScript, getTermsAutoCheckScript } from "./consent-dismiss.js";
 import { solveCaptcha, isCaptchaSolverEnabled } from "./captcha-solver.js";
@@ -55,11 +55,54 @@ const LEAP_TILE = process.env.LEAP_TILE || "grid";
 const LEAP_TILE_PADDING = Number(process.env.LEAP_TILE_PADDING ?? 8);
 const LEAP_SCREEN_WIDTH = Number(process.env.LEAP_SCREEN_WIDTH || 0);
 const LEAP_SCREEN_HEIGHT = Number(process.env.LEAP_SCREEN_HEIGHT || 0);
-const LEAP_MULTI_TILE = process.env.LEAP_MULTI_TILE === "true";
+// WORKAROUND: Claude Code on Windows does not pass mcp.json env vars.
+// Default multi-tile ON so cross-terminal tiling works out of the box.
+const LEAP_MULTI_TILE = process.env.LEAP_MULTI_TILE !== "false";
 const LEAP_HUD = process.env.LEAP_HUD === "true";
 const LEAP_AUTO_CONSENT = process.env.LEAP_AUTO_CONSENT !== "false"; // default ON
 const LEAP_TRACE = process.env.LEAP_TRACE === "true";
 const LEAP_RECORD = process.env.LEAP_RECORD === "true";
+const LEAP_AD_BLOCK = process.env.LEAP_AD_BLOCK !== "false"; // default ON
+// ── Ad/Tracker Blocking ──────────────────────────────────────────────────
+const AD_BLOCK_DOMAINS = new Set([
+    "doubleclick.net", "googlesyndication.com", "googleadservices.com",
+    "google-analytics.com", "googletagmanager.com", "googletagservices.com",
+    "adservice.google.com", "pagead2.googlesyndication.com",
+    "facebook.net", "connect.facebook.net", "fbcdn.net",
+    "amazon-adsystem.com", "ads-api.twitter.com",
+    "ads.yahoo.com", "analytics.yahoo.com",
+    "scorecardresearch.com", "quantserve.com", "outbrain.com",
+    "taboola.com", "criteo.com", "criteo.net",
+    "moatads.com", "adsrvr.org", "adnxs.com", "rubiconproject.com",
+    "pubmatic.com", "openx.net", "casalemedia.com",
+    "chartbeat.com", "hotjar.com", "mixpanel.com", "segment.io",
+    "newrelic.com", "nr-data.net", "optimizely.com",
+    "demdex.net", "omtrdc.net", "2o7.net",
+    "tealiumiq.com", "tags.tiqcdn.com",
+]);
+function shouldBlockUrl(url) {
+    try {
+        const hostname = new URL(url).hostname;
+        for (const domain of AD_BLOCK_DOMAINS) {
+            if (hostname === domain || hostname.endsWith("." + domain))
+                return true;
+        }
+    }
+    catch { }
+    return false;
+}
+function attachAdBlocker(context) {
+    if (!LEAP_AD_BLOCK)
+        return;
+    context.route("**/*", (route) => {
+        if (shouldBlockUrl(route.request().url())) {
+            route.abort("blockedbyclient").catch(() => { });
+        }
+        else {
+            route.fallback().catch(() => { });
+        }
+    });
+}
 const sessions = new SessionManager({
     maxSessions: MAX_SESSIONS,
     idleTimeoutMs: IDLE_TIMEOUT_MS,
@@ -86,20 +129,17 @@ if (LEAP_TILE && LEAP_TILE !== "false") {
     const defaultW = LEAP_SCREEN_WIDTH > 0 ? LEAP_SCREEN_WIDTH : detectedScreen?.width ?? 1920;
     const defaultH = LEAP_SCREEN_HEIGHT > 0 ? LEAP_SCREEN_HEIGHT : detectedScreen?.height ?? 1080;
     tilesCoord = new TilesCoordinator(defaultW, defaultH);
+    // Reap dead PIDs on startup — clean up crashed/killed instances.
+    // Do NOT purge other live PIDs — they're other terminals we want to tile with.
+    tilesCoord.reapDeadSlots().catch(() => { });
     // File watcher only needed for multi-terminal mode (multiple Leapfrog instances).
     // In single-instance mode, the watcher causes spurious reflows that fight
     // with external monitor positioning. Only enable when explicitly requested.
     if (LEAP_MULTI_TILE) {
         tilesCoord.watch((state) => {
             if (tileManager.isEnabled()) {
-                const sessionMap = new Map();
-                for (const si of sessions.listSessions()) {
-                    const sess = sessions.getSession(si.id);
-                    if (sess)
-                        sessionMap.set(si.id, sess);
-                }
-                logger.info("tile.watcher_reflow", { globalTotal: state.slots.length, local: sessionMap.size });
-                tileManager.reflowAll(sessionMap).catch((e) => logger.warn("tile.watcher_reflow_failed", { error: e?.message }));
+                logger.info("tile.watcher_reflow", { globalTotal: state.slots.length });
+                reflowWithContext().catch((e) => logger.warn("tile.watcher_reflow_failed", { error: e?.message }));
             }
         });
     }
@@ -329,6 +369,9 @@ server.registerTool("session_create", {
         }
         // Always inject intervention detection (lightweight MutationObserver)
         await session.context.addInitScript(getDetectionInitScript());
+        // Agent eyes — cursor dot + scroll indicator (zero Node overhead, listens to native DOM events)
+        await session.context.addInitScript(getAgentEyesInitScript());
+        attachAdBlocker(session.context);
         // Start tracing if enabled
         if (LEAP_TRACE) {
             await session.context.tracing.start({ screenshots: true, snapshots: true });
@@ -346,6 +389,107 @@ server.registerTool("session_create", {
         const stats = sessions.getStats();
         return ok(`Session created: ${session.id}${pinned ? " (pinned)" : ""}\n` +
             `Pool: ${stats.active}/${stats.maxSessions} active`);
+    }
+    catch (e) {
+        return err(e.message);
+    }
+});
+// ─── session_create_batch ────────────────────────────────────────────────────
+server.registerTool("session_create_batch", {
+    title: "Create Multiple Browser Sessions",
+    description: "Create multiple isolated browser sessions concurrently — 5-10x faster than sequential session_create calls. " +
+        "Optionally navigate each to a URL. Returns all session IDs. " +
+        "A single reflow positions all windows into a unified grid after all sessions are created.",
+    inputSchema: z.object({
+        sessions: z.array(z.object({
+            url: z.string().optional().describe("URL to navigate after creation."),
+            headed: z.boolean().optional().describe("Run with visible UI."),
+            viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Custom viewport."),
+            profile: z.string().optional().describe("Profile shorthand name for persistent Chrome profile."),
+            pinned: z.boolean().optional().describe("Pin to prevent idle timeout."),
+            waitUntil: z.enum(["load", "domcontentloaded", "networkidle"]).optional().describe("Wait strategy for navigation."),
+        })).min(1).max(15).describe("Array of sessions to create."),
+    }).strict(),
+}, async ({ sessions: sessionSpecs }) => {
+    try {
+        const results = [];
+        // Phase 1: Create all sessions concurrently
+        const createPromises = sessionSpecs.map(async (spec) => {
+            try {
+                const session = await sessions.createSession({
+                    headed: spec.headed,
+                    viewport: spec.viewport,
+                    profile: spec.profile,
+                });
+                if (spec.pinned)
+                    session.pinned = true;
+                // Inject init scripts
+                if (LEAP_HUD)
+                    await session.context.addInitScript(getHUDInitScript(session.name ?? session.id));
+                if (LEAP_AUTO_CONSENT)
+                    await session.context.addInitScript(getConsentDismissScript());
+                await session.context.addInitScript(getDetectionInitScript());
+                await session.context.addInitScript(getAgentEyesInitScript());
+                attachAdBlocker(session.context);
+                if (LEAP_TRACE)
+                    await session.context.tracing.start({ screenshots: true, snapshots: true });
+                // Claim tile slot (without triggering reflow yet — watcher handles it)
+                if (tilesCoord) {
+                    const detected = tileManager.getScreenSize();
+                    if (detected)
+                        await tilesCoord.updateScreenSize(detected.width, detected.height).catch(() => { });
+                    await tilesCoord.claimSlot(session.id).catch(() => { });
+                }
+                return { session, spec };
+            }
+            catch (e) {
+                return { error: e.message, spec };
+            }
+        });
+        const created = await Promise.all(createPromises);
+        // Phase 2: Navigate sessions that have URLs (concurrently)
+        const navPromises = created.map(async (result) => {
+            if ("error" in result && result.error) {
+                results.push({ id: "(failed)", url: result.spec.url, error: result.error });
+                return;
+            }
+            const { session, spec } = result;
+            if (spec.url) {
+                try {
+                    const parsed = new URL(spec.url);
+                    if (!["http:", "https:"].includes(parsed.protocol)) {
+                        results.push({ id: session.id, error: `Blocked URL scheme: ${parsed.protocol}` });
+                        return;
+                    }
+                    const ssrfBlock = await checkSSRF(parsed.hostname);
+                    if (ssrfBlock) {
+                        results.push({ id: session.id, error: ssrfBlock });
+                        return;
+                    }
+                    await session.page.goto(spec.url, {
+                        waitUntil: spec.waitUntil || "domcontentloaded",
+                        timeout: 30000,
+                    });
+                    results.push({ id: session.id, url: spec.url });
+                }
+                catch (e) {
+                    results.push({ id: session.id, url: spec.url, error: e.message });
+                }
+            }
+            else {
+                results.push({ id: session.id });
+            }
+        });
+        await Promise.all(navPromises);
+        // Phase 3: Single global reflow
+        await reflowWithContext().catch(() => { });
+        const stats = sessions.getStats();
+        const lines = results.map((r) => r.error
+            ? `${r.id} — ERROR: ${r.error}`
+            : `${r.id}${r.url ? ` → ${r.url}` : ""}`);
+        return ok(`Created ${results.filter((r) => !r.error).length}/${sessionSpecs.length} sessions\n` +
+            `Pool: ${stats.active}/${stats.maxSessions} active\n\n` +
+            lines.join("\n"));
     }
     catch (e) {
         return err(e.message);
@@ -532,7 +676,7 @@ server.registerTool("navigate", {
         url: z.string().describe("Full URL including https://"),
         waitUntil: z
             .enum(["load", "domcontentloaded", "networkidle"])
-            .default("load")
+            .default("domcontentloaded")
             .describe("Wait strategy. Use networkidle for SPAs."),
         autoRetry: z
             .boolean()

@@ -208,8 +208,8 @@ describe("CdpConnector.discoverFromPortFiles", () => {
 
   it("finds Chrome from a valid DevToolsActivePort file", async () => {
     mockedReadFile.mockImplementation(async (filePath) => {
-      const p = String(filePath);
-      if (p.includes("Google") && p.includes("Chrome") && !p.includes("Canary")) {
+      const p = String(filePath).toLowerCase();
+      if ((p.includes("google") && p.includes("chrome") && !p.includes("canary") && !p.includes("sxs")) || p.includes("google-chrome/")) {
         return "9222\n/devtools/browser/abc-123\n";
       }
       throw new Error("ENOENT");
